@@ -4588,6 +4588,9 @@ trait Typers extends Modes with Adaptations with Tags {
           checkDead(typedQualifier(qual, mode))
 */
 
+	val oldState = context.state
+	context.retyping = true
+	try {
           val qual1 = if (isApply) silent(t => checkDead(t.typedQualifier(qual, forFunMode(mode))), false, tree) match {
             case SilentResultValue(qual1) => qual1
             case SilentTypeError(ex) =>
@@ -4750,6 +4753,10 @@ trait Typers extends Modes with Adaptations with Tags {
                 doDefault()
             }
           }
+	} finally {
+	  context.flushBuffer()
+	  context.restoreState(oldState)
+	}
       }
 
 
