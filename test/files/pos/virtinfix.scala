@@ -17,7 +17,7 @@ object Test {
     def test1 = {
       val r = unit(6.0)
       val q = unit(6.0)
-      //val theta = r/sqrt(-1.0*q*q*q*q)
+      val theta = r/sqrt(-1.0*q*q*q*q)
     }
     def test2 = {
       val numRows = unit(7)
