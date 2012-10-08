@@ -6126,6 +6126,7 @@ trait Typers extends Modes with Adaptations with Tags {
       // setup the typer for the stats
       // the stats must be typed to detect the self reference, so that selections on the self-variable can be rewritten
       val statTyper = newTyper(context.make(templ, origClass, newScope)) //.typedStats(statsUntyped.toList, templ.symbol)
+      statTyper.context.retyping = true
       if (templ.symbol == NoSymbol) templ setSymbol origClass.newLocalDummy(templ.pos)
       val self1 = templ.self match {
         case vd @ ValDef(mods, name, tpt, EmptyTree) =>
