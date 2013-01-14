@@ -4078,6 +4078,36 @@ trait Typers extends Modes with Adaptations with Tags {
     object dyna {
       import treeInfo.{isApplyDynamicName, DynamicUpdate, DynamicApplicationNamed}
 
+      @inline private def boolOpt(c: Boolean) = if(c) Some(()) else None
+      @inline private def listOpt[T](xs: List[T]) = xs match { case x :: Nil => Some(x) case _ => None }
+      @inline private def symOpt[T](sym: Symbol) = if(sym == NoSymbol) None else Some(sym) // TODO: handle overloading?
+
+      /** Is `qual` a staged struct? (i.e., of type Rep[Struct[Rep]{decls}])?
+       * Then what's the type of `name`?
+       */
+      def structSelectedMember(qual: Tree, name: Name): Option[(Type, Symbol)] = if (opt.virtualize) {
+        debuglog("[DNR] dynatype on struct for "+ qual +" : "+ qual.tpe +" <DOT> "+ name)
+        val structTp = (prefixInWith(context.owner, EmbeddedControlsClass) getOrElse PredefModule.tpe).memberType(EmbeddedControls_Struct)
+        debuglog("[DNR] context, tp "+ (context.owner.ownerChain, structTp))
+
+        val rep = NoSymbol.newTypeParameter(newTypeName("Rep"))
+        val repTpar = rep.newTypeParameter(newTypeName("T")).setFlag(COVARIANT).setInfo(TypeBounds.empty)
+        rep.setInfo(polyType(List(repTpar), TypeBounds.empty))
+        val repVar = TypeVar(rep)
+
+        for(
+          _ <- boolOpt((qual.tpe ne null) && qual.tpe <:< repVar.applyArgs(List(appliedType(structTp, List(repVar))))); // qual.tpe <:< ?Rep[Struct[?Rep]] -- not Struct[Any], because that requires covariance of Rep!?
+          repTp <- listOpt(solvedTypes(List(repVar), List(rep), List(COVARIANT), false, -3)); // search for minimal solution
+          // _ <- Some(println("mkInvoke repTp="+ repTp));
+          // if so, generate an invocation and give it type `Rep[T]`, where T is the type given to member `name` in `decls`
+          repSym = repTp.typeSymbolDirect;
+          qualStructTp <- qual.tpe.baseType(repSym).typeArgs.headOption; // this specifies `decls`
+          member <- symOpt(qualStructTp.member(name))
+        ) yield {
+          (qualStructTp, member)
+        }
+      } else None
+
       def acceptsApplyDynamic(tp: Type) = tp.typeSymbol isNonBottomSubClass DynamicClass
 
       /** Returns `Some(t)` if `name` can be selected dynamically on `qual`, `None` if not.
@@ -4087,13 +4117,26 @@ trait Typers extends Modes with Adaptations with Tags {
       def acceptsApplyDynamicWithType(qual: Tree, name: Name): Option[Type] =
         // don't selectDynamic selectDynamic, do select dynamic at unknown type,
         // in scala-virtualized, we may return a Some(tp) where tp ne NoType
-        if (!isApplyDynamicName(name) && acceptsApplyDynamic(qual.tpe.widen)) Some(NoType)
-        else None
+        //if (!isApplyDynamicName(name) && acceptsApplyDynamic(qual.tpe.widen)) Some(NoType)
+        //else None
+        if (isApplyDynamicName(name)) None
+        else
+          structSelectedMember(qual, name) match {
+            // Some(tp) ==> do select dynamic and pass it `tp`, the type specified for `name` by the struct `qual`
+            case Some((pre, sym))                           => Some(pre.memberType(sym).finalResultType)
+            case _ if (acceptsApplyDynamic(qual.tpe.widen)) => Some(NoType)
+            case _                                          => None
+          }
 
       def isDynamicallyUpdatable(tree: Tree) = tree match {
         case DynamicUpdate(qual, name) =>
-          // if the qualifier is a Dynamic, that's all we need to know
-          acceptsApplyDynamic(qual.tpe)
+          structSelectedMember(qual, newTermName(name.toString)) match {
+            case Some((pre, sym)) =>
+              pre.member(nme.getterToSetter(sym.name)) != NoSymbol // but does it have a setter? can't use sym.accessed.isMutable since sym.accessed does not exist
+            case _ =>
+            // if the qualifier is a Dynamic, that's all we need to know
+            acceptsApplyDynamic(qual.tpe)
+	  }
         case _ => false
       }
 
@@ -4135,8 +4178,8 @@ trait Typers extends Modes with Adaptations with Tags {
        *  - simplest solution: have two method calls
        *
        */
-      def mkInvoke(cxTree: Tree, tree: Tree, qual: Tree, name: Name): Option[Tree] = {
-        log(s"dyna.mkInvoke($cxTree, $tree, $qual, $name)")
+      def mkInvoke(cxTree: Tree, mode: Int, tree: Tree, qual: Tree, name: Name): Option[Tree] = {
+        log(s"dyna.mkInvoke($cxTree, $mode, $tree, $qual, $name)")
         val treeInfo.Applied(treeSelection, _, _) = tree
         def isDesugaredApply = treeSelection match {
           case Select(`qual`, nme.apply) => true
@@ -4161,6 +4204,7 @@ trait Typers extends Modes with Adaptations with Tags {
            *  See SI-6731 among others.
            */
           def findSelection(t: Tree): Option[(TermName, Tree)] = t match {
+            case _ if (mode & (LHSmode | QUALmode)) == LHSmode => Some((nme.updateDynamic, qual))
             case Apply(fn, args) if hasStar(args) => DynamicVarArgUnsupported(tree, applyOp(args)) ; None
             case Apply(fn, args) if matches(fn)   => Some((applyOp(args), fn))
             case Assign(lhs, _) if matches(lhs)   => Some((nme.updateDynamic, lhs))
@@ -4478,16 +4522,17 @@ trait Typers extends Modes with Adaptations with Tags {
         }
       }
 
-      def typedNew(tree: New) = {
+      def typedNew(tree: New): Tree = {
         val tpt = tree.tpt
-        val tpt1 = {
-          // This way typedNew always returns a dealiased type. This used to happen by accident
-          // for instantiations without type arguments due to ad hoc code in typedTypeConstructor,
-          // and annotations depended on it (to the extent that they worked, which they did
-          // not when given a parameterized type alias which dealiased to an annotation.)
-          // typedTypeConstructor dealiases nothing now, but it makes sense for a "new" to always be
-          // given a dealiased type.
-          val tpt0 = typedTypeConstructor(tpt) modifyType (_.dealias)
+        // This way typedNew always returns a dealiased type. This used to happen by accident
+        // for instantiations without type arguments due to ad hoc code in typedTypeConstructor,
+        // and annotations depended on it (to the extent that they worked, which they did
+        // not when given a parameterized type alias which dealiased to an annotation.)
+        // typedTypeConstructor dealiases nothing now, but it makes sense for a "new" to always be
+        // given a dealiased type.
+        val tpt0 = typedTypeConstructor(tpt) modifyType (_.dealias)
+        val willReify = willReifyNew(tpt0.tpe)
+        val tpt1 = if (willReify) tpt0 else {
           if (checkStablePrefixClassType(tpt0))
             if (tpt0.hasSymbol && !tpt0.symbol.typeParams.isEmpty) {
               context.undetparams = cloneSymbols(tpt0.symbol.typeParams)
@@ -4513,7 +4558,7 @@ trait Typers extends Modes with Adaptations with Tags {
 
         val tp = tpt1.tpe
         val sym = tp.typeSymbol.initialize
-        if (sym.isAbstractType || sym.hasAbstractFlag)
+        if (!willReify && (sym.isAbstractType || sym.hasAbstractFlag))
           IsAbstractError(tree, sym)
         else if (isPrimitiveValueClass(sym)) {
           NotAMemberError(tpt, TypeTree(tp), nme.CONSTRUCTOR)
@@ -5224,7 +5269,7 @@ trait Typers extends Modes with Adaptations with Tags {
        *  @return     ...
        */
       def typedSelect(tree: Tree, qual: Tree, name: Name): Tree = {
-        def asDynamicCall = dyna.mkInvoke(context.tree, tree, qual, name) map { t =>
+        def asDynamicCall = dyna.mkInvoke(context.tree, mode, tree, qual, name) map { t =>
           dyna.wrapErrors(t, (_.typed1(t, mode, pt)))
         }
 
