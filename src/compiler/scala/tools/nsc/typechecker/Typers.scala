@@ -4207,14 +4207,16 @@ trait Typers extends Modes with Adaptations with Tags {
             case _ if (mode & (LHSmode | QUALmode)) == LHSmode => Some((nme.updateDynamic, qual))
             case Apply(fn, args) if hasStar(args) => DynamicVarArgUnsupported(tree, applyOp(args)) ; None
             case Apply(fn, args) if matches(fn)   => Some((applyOp(args), fn))
-            case Assign(lhs, _) if matches(lhs)   => Some((nme.updateDynamic, lhs))
+            //case Assign(lhs, _) if matches(lhs)   => Some((nme.updateDynamic, lhs))
             case _ if matches(t)                  => Some((nme.selectDynamic, t))
             case _                                => t.children flatMap findSelection headOption
           }
           findSelection(cxTree) match {
             case Some((opName, treeInfo.Applied(_, targs, _))) =>
-              val fun = gen.mkTypeApply(Select(qual, opName), targs)
-              atPos(qual.pos)(Apply(fun, Literal(Constant(name.decode)) :: Nil))
+              val sel = Select(qual, opName)
+              val fun = gen.mkTypeApply(sel, if (tp ne NoType) List(TypeTree(tp)) else targs)
+              val app = Apply(fun, Literal(Constant(name.decode)) :: Nil)
+              atPos(qual.pos)(app)
             case _ =>
               setError(tree)
           }
@@ -5048,9 +5050,17 @@ trait Typers extends Modes with Adaptations with Tags {
                 && ((fun2.symbol eq null) || !fun2.symbol.isConstructor)
                 && (mode & (EXPRmode | SNDTRYmode)) == EXPRmode
               )
-              val res =
+              val res0 =
                 if (useTry) tryTypedApply(fun2, args)
                 else doTypedApply(tree, fun2, args, mode, pt)
+              val res = res0 match { // TODO: is this ok?
+                case treeInfo.DynamicApplication(_, _) if isImplicitMethod(res0.tpe) && inNoModes(mode, TAPPmode) =>
+                  // adapt in EXPRmode so that implicits will be resolved now,
+                  // before any chained apply/update's are called (to support def selectDynamic[T: Manifest])
+                  // see test/files/run/applydynamic_row.scala
+                  adapt(res0, EXPRmode, pt)
+                case _ => res0
+              }
 
             /*
               if (fun2.hasSymbol && fun2.symbol.isConstructor && (mode & EXPRmode) != 0) {
