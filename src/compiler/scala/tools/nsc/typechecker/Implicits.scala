@@ -149,9 +149,20 @@ trait Implicits extends SourceContextUtils {
   class SearchResult(val tree: Tree, val subst: TreeTypeSubstituter) {
     override def toString = "SearchResult(%s, %s)".format(tree,
       if (subst.isEmpty) "" else subst)
+    
+    def isFailure          = false
+    def isAmbiguousFailure = false
+    final def isSuccess    = !isFailure
   }
 
-  lazy val SearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter)
+  lazy val SearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter) {
+    override def isFailure = true
+  }
+  
+  lazy val AmbiguousSearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter) {
+    override def isFailure          = true
+    override def isAmbiguousFailure = true
+  }
 
   /** A class that records an available implicit
    *  @param   name   The name of the implicit
@@ -432,8 +443,8 @@ trait Implicits extends SourceContextUtils {
       val start = if (Statistics.canEnable) Statistics.startTimer(matchesPtNanos) else null
       val result = normSubType(tp, pt) || isView && {
         pt match {
-          case TypeRef(_, Function1.Sym, args) =>
-            matchesPtView(tp, args.head, args.tail.head, undet)
+          case TypeRef(_, Function1.Sym, arg1 :: arg2 :: Nil) =>
+            matchesPtView(tp, arg1, arg2, undet)
           case _ =>
             false
         }
@@ -477,7 +488,7 @@ trait Implicits extends SourceContextUtils {
             loop(restpe, pt)
           else pt match {
             case tr @ TypeRef(pre, sym, args) =>
-              if (sym.isAliasType) loop(tp, pt.normalize)
+              if (sym.isAliasType) loop(tp, pt.dealias)
               else if (sym.isAbstractType) loop(tp, pt.bounds.lo)
               else {
                 val len = args.length - 1
@@ -521,18 +532,15 @@ trait Implicits extends SourceContextUtils {
      *  to a final true or false.
      */
     private def isPlausiblySubType(tp1: Type, tp2: Type) = !isImpossibleSubType(tp1, tp2)
-    private def isImpossibleSubType(tp1: Type, tp2: Type) = tp1.normalize.widen match {
-      case tr1 @ TypeRef(_, sym1, _) =>
-        // We can only rule out a subtype relationship if the left hand
-        // side is a class, else we may not know enough.
-        sym1.isClass && (tp2.normalize.widen match {
-          case TypeRef(_, sym2, _) =>
-             sym2.isClass && !(sym1 isWeakSubClass sym2)
-          case RefinedType(parents, decls) =>
-            decls.nonEmpty &&
-            tr1.member(decls.head.name) == NoSymbol
-          case _ => false
-        })
+    private def isImpossibleSubType(tp1: Type, tp2: Type) = tp1.dealiasWiden match {
+      // We can only rule out a subtype relationship if the left hand
+      // side is a class, else we may not know enough.
+      case tr1 @ TypeRef(_, sym1, _) if sym1.isClass =>
+        tp2.dealiasWiden match {
+          case TypeRef(_, sym2, _)         => sym2.isClass && !(sym1 isWeakSubClass sym2)
+          case RefinedType(parents, decls) => decls.nonEmpty && tr1.member(decls.head.name) == NoSymbol
+          case _                           => false
+        }
       case _ => false
     }
 
@@ -831,7 +839,7 @@ trait Implicits extends SourceContextUtils {
             catch divergenceHandler
 
           tryImplicitInfo(i) match {
-            case SearchFailure  =>
+            case sr if sr.isFailure =>
               // We don't want errors that occur during checking implicit info
               // to influence the check of further infos.
               context.condBufferFlush(_.kind != ErrorKinds.Divergent)
@@ -871,14 +879,14 @@ trait Implicits extends SourceContextUtils {
             rest find (alt => !improves(chosen, alt)) match {
               case Some(competing)  =>
                 AmbiguousImplicitError(chosen, competing, "both", "and", "")(isView, pt, tree)(context)
-                return SearchFailure // Stop the search once ambiguity is encountered, see t4457_2.scala
+                return AmbiguousSearchFailure // Stop the search once ambiguity is encountered, see t4457_2.scala
               case _                =>
                 if (isView) chosen.useCountView += 1
                 else chosen.useCountArg += 1
             }
         }
 
-        if (best == SearchFailure) {
+        if (best.isFailure) {
           /** If there is no winner, and we witnessed and caught divergence,
            *  now we can throw it for the error message.
            */
@@ -935,8 +943,8 @@ trait Implicits extends SourceContextUtils {
      *    - for alias types and abstract types, we take instead the parts
      *    - of their upper bounds.
      *  @return For those parts that refer to classes with companion objects that
-     *  can be accessed with unambiguous stable prefixes, the implicits infos
-     *  which are members of these companion objects.
+     *  can be accessed with unambiguous stable prefixes that are not existentially
+     *  bound, the implicits infos which are members of these companion objects.
      */
     private def companionImplicitMap(tp: Type): InfoMap = {
 
@@ -952,7 +960,7 @@ trait Implicits extends SourceContextUtils {
                 infoMap(sym) = List() // ambiguous prefix - ignore implicit members
               }
             case None =>
-              if (pre.isStable) {
+              if (pre.isStable && !pre.typeSymbol.isExistentiallyBound) {
                 val companion = companionSymbolOf(sym, context)
                 companion.moduleClass match {
                   case mc: ModuleClassSymbol =>
@@ -1007,7 +1015,7 @@ trait Implicits extends SourceContextUtils {
                 args foreach (getParts(_))
               }
             } else if (sym.isAliasType) {
-              getParts(tp.normalize)
+              getParts(tp.dealias)
             } else if (sym.isAbstractType) {
               getParts(tp.bounds.hi)
             }
@@ -1037,88 +1045,6 @@ trait Implicits extends SourceContextUtils {
       )
       infoMap
     }
-
-    /** The parts of a type is the smallest set of types that contains
-     *    - the type itself
-     *    - the parts of its immediate components (prefix and argument)
-     *    - the parts of its base types
-     *    - for alias types and abstract types, we take instead the parts
-     *    - of their upper bounds.
-     *  @return For those parts that refer to classes with companion objects that
-     *  can be accessed with unambiguous stable prefixes, the implicits infos
-     *  which are members of these companion objects.
-
-    private def companionImplicits(tp: Type): Infoss = {
-      val partMap = new LinkedHashMap[Symbol, Type]
-      val seen = mutable.HashSet[Type]()  // cycle detection
-
-      /** Enter all parts of `tp` into `parts` set.
-       *  This method is performance critical: about 2-4% of all type checking is spent here
-       */
-      def getParts(tp: Type) {
-        if (seen(tp))
-          return
-        seen += tp
-        tp match {
-          case TypeRef(pre, sym, args) =>
-            if (sym.isClass) {
-              if (!((sym.name == tpnme.REFINE_CLASS_NAME) ||
-                    (sym.name startsWith tpnme.ANON_CLASS_NAME) ||
-                    (sym.name == tpnme.ROOT)))
-                partMap get sym match {
-                  case Some(pre1) =>
-                    if (!(pre =:= pre1)) partMap(sym) = NoType // ambiguous prefix - ignore implicit members
-                  case None =>
-                    if (pre.isStable) partMap(sym) = pre
-                    val bts = tp.baseTypeSeq
-                    var i = 1
-                    while (i < bts.length) {
-                      getParts(bts(i))
-                      i += 1
-                    }
-                    getParts(pre)
-                    args foreach getParts
-                }
-            } else if (sym.isAliasType) {
-              getParts(tp.normalize)
-            } else if (sym.isAbstractType) {
-              getParts(tp.bounds.hi)
-            }
-          case ThisType(_) =>
-            getParts(tp.widen)
-          case _: SingletonType =>
-            getParts(tp.widen)
-          case RefinedType(ps, _) =>
-            for (p <- ps) getParts(p)
-          case AnnotatedType(_, t, _) =>
-            getParts(t)
-          case ExistentialType(_, t) =>
-            getParts(t)
-          case PolyType(_, t) =>
-            getParts(t)
-          case _ =>
-        }
-      }
-
-      getParts(tp)
-
-      val buf = new ListBuffer[Infos]
-      for ((clazz, pre) <- partMap) {
-        if (pre != NoType) {
-          val companion = clazz.companionModule
-          companion.moduleClass match {
-            case mc: ModuleClassSymbol =>
-              buf += (mc.implicitMembers map (im =>
-                new ImplicitInfo(im.name, singleType(pre, companion), im)))
-            case _ =>
-          }
-        }
-      }
-      //println("companion implicits of "+tp+" = "+buf.toList) // DEBUG
-      buf.toList
-    }
-
-*/
 
     /** The implicits made available by type `pt`.
      *  These are all implicits found in companion objects of classes C
@@ -1247,7 +1173,7 @@ trait Implicits extends SourceContextUtils {
         implicit def wrapResult(tree: Tree): SearchResult =
           if (tree == EmptyTree) SearchFailure else new SearchResult(tree, if (from.isEmpty) EmptyTreeTypeSubstituter else new TreeTypeSubstituter(from, to))
 
-        val tp1 = tp0.normalize
+        val tp1 = tp0.dealias
         tp1 match {
           case ThisType(_) | SingleType(_, _) =>
             // can't generate a reference to a value that's abstracted over by an existential
@@ -1318,17 +1244,17 @@ trait Implicits extends SourceContextUtils {
         else {
           if (ReflectRuntimeUniverse == NoSymbol) {
             // todo. write a test for this
-            context.error(pos, s"""
-              |to create a manifest here, it is necessary to interoperate with the type tag `$tagInScope` in scope.
-              |however typetag -> manifest conversion requires Scala reflection, which is not present on the classpath.
-              |to proceed put scala-reflect.jar on your compilation classpath and recompile.""".trim.stripMargin)
+            context.error(pos,
+              sm"""to create a manifest here, it is necessary to interoperate with the type tag `$tagInScope` in scope.
+                  |however typetag -> manifest conversion requires Scala reflection, which is not present on the classpath.
+                  |to proceed put scala-reflect.jar on your compilation classpath and recompile.""")
             return SearchFailure
           }
           if (resolveClassTag(pos, tp, allowMaterialization = true) == EmptyTree) {
-            context.error(pos, s"""
-              |to create a manifest here, it is necessary to interoperate with the type tag `$tagInScope` in scope.
-              |however typetag -> manifest conversion requires a class tag for the corresponding type to be present.
-              |to proceed add a class tag to the type `$tp` (e.g. by introducing a context bound) and recompile.""".trim.stripMargin)
+            context.error(pos,
+              sm"""to create a manifest here, it is necessary to interoperate with the type tag `$tagInScope` in scope.
+                  |however typetag -> manifest conversion requires a class tag for the corresponding type to be present.
+                  |to proceed add a class tag to the type `$tp` (e.g. by introducing a context bound) and recompile.""")
             return SearchFailure
           }
           val cm = typed(Ident(ReflectRuntimeCurrentMirror))
@@ -1392,24 +1318,25 @@ trait Implicits extends SourceContextUtils {
       // invoke update on implicitly found SourceContext
       var updateSourceContext = true
 
-      if (result == SearchFailure) {
+      if (result.isFailure) {
         if (Statistics.canEnable) Statistics.stopTimer(inscopeFailNanos, failstart)
       } else {
         if (Statistics.canEnable) Statistics.stopTimer(inscopeSucceedNanos, succstart)
         if (Statistics.canEnable) Statistics.incCounter(inscopeImplicitHits)
       }
-      if (result == SearchFailure) {
+      if (result.isFailure) {
         val previousErrs = context.flushAndReturnBuffer()
         val failstart = if (Statistics.canEnable) Statistics.startTimer(oftypeFailNanos) else null
         val succstart = if (Statistics.canEnable) Statistics.startTimer(oftypeSucceedNanos) else null
 
+        val wasAmbigious = result.isAmbiguousFailure // SI-6667, never search companions after an ambiguous error in in-scope implicits
         result = materializeImplicit(pt)
 
         // `materializeImplicit` does some preprocessing for `pt`
         // is it only meant for manifests/tags or we need to do the same for `implicitsOfExpectedType`?
-        if (result == SearchFailure) result = searchImplicit(implicitsOfExpectedType, false)
+        if (result.isFailure && !wasAmbigious) result = searchImplicit(implicitsOfExpectedType, false)
 
-        if (result == SearchFailure) {
+        if (result.isFailure) {
           pt.dealias match {
             case TypeRef(_, SourceContextClass, _) =>
               // construct new SourceContext instance
@@ -1426,7 +1353,7 @@ trait Implicits extends SourceContextUtils {
         }
       }
 
-      if (result == SearchFailure && settings.debug.value)
+      if (result.isFailure && settings.debug.value)
         log("no implicits found for "+pt+" "+pt.typeSymbol.info.baseClasses+" "+implicitsOfExpectedType)
 
       updatedWithSourceContext(this, tree, pt, context0, result, updateSourceContext)

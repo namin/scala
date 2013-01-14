@@ -435,7 +435,7 @@ trait Printers extends api.Printers { self: SymbolTable =>
         case tree =>
           xprintTree(this, tree)
       }
-      if (printTypes && tree.isTerm && !tree.isEmpty) {
+      if (printTypes && tree.isTerm && tree.canHaveAttrs) {
         print("{", if (tree.tpe eq null) "<null>" else tree.tpe.toString, "}")
       }
     }
@@ -542,8 +542,10 @@ trait Printers extends api.Printers { self: SymbolTable =>
           print(")")
         case EmptyTree =>
           print("EmptyTree")
-        case emptyValDef: AnyRef if emptyValDef eq self.emptyValDef =>
+        case self.emptyValDef =>
           print("emptyValDef")
+        case self.pendingSuperCall =>
+          print("pendingSuperCall")
         case tree: Tree =>
           val hasSymbol = tree.hasSymbol && tree.symbol != NoSymbol
           val isError = hasSymbol && tree.symbol.name.toString == nme.ERROR.toString
@@ -561,8 +563,11 @@ trait Printers extends api.Printers { self: SymbolTable =>
                   if (isError) print(": error>")
                 } else if (hasSymbol) {
                   tree match {
-                    case _: Ident | _: Select | _: SelectFromTypeTree => print(tree.symbol)
-                    case _ => print(tree.symbol.name)
+                    case refTree: RefTree =>
+                      if (tree.symbol.name != refTree.name) print("[", tree.symbol, " aka ", refTree.name, "]")
+                      else print(tree.symbol)
+                    case _ =>
+                      print(tree.symbol.name)
                   }
                 } else {
                   print(name)

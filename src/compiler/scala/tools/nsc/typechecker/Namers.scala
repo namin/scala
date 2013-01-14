@@ -113,10 +113,8 @@ trait Namers extends MethodSynthesis {
       || (context.unit.isJava)
     )
     def noFinishGetterSetter(vd: ValDef) = (
-         vd.mods.isPrivateLocal
-      || vd.symbol.isModuleVar
-      || vd.symbol.isLazy
-    )
+         (vd.mods.isPrivateLocal && !vd.mods.isLazy) // all lazy vals need accessors, even private[this]
+      || vd.symbol.isModuleVar)
 
     def setPrivateWithin[T <: Symbol](tree: Tree, sym: T, mods: Modifiers): T =
       if (sym.isPrivateLocal || !mods.hasAccessBoundary) sym
@@ -400,7 +398,7 @@ trait Namers extends MethodSynthesis {
      *  a module definition or a class definition.
      */
     def enterModuleSymbol(tree : ModuleDef): Symbol = {
-      var m: Symbol = context.scope.lookup(tree.name)
+      var m: Symbol = context.scope lookupAll tree.name find (_.isModule) getOrElse NoSymbol
       val moduleFlags = tree.mods.flags | MODULE
       if (m.isModule && !m.isPackage && inCurrentScope(m) && (currentRun.canRedefine(m) || m.isSynthetic)) {
         updatePosFlags(m, tree.pos, moduleFlags)
@@ -849,13 +847,8 @@ trait Namers extends MethodSynthesis {
     private def templateSig(templ: Template): Type = {
       val clazz = context.owner
       def checkParent(tpt: Tree): Type = {
-        val tp = tpt.tpe
-        val inheritsSelf = tp.typeSymbol == owner
-        if (inheritsSelf)
-          InheritsItselfError(tpt)
-
-        if (inheritsSelf || tp.isError) AnyRefClass.tpe
-        else tp
+        if (tpt.tpe.isError) AnyRefClass.tpe
+        else tpt.tpe
       }
 
       val parents = typer.parentTypes(templ) map checkParent
@@ -1262,7 +1255,11 @@ trait Namers extends MethodSynthesis {
           case defn: MemberDef =>
             val ainfos = defn.mods.annotations filterNot (_ eq null) map { ann =>
               // need to be lazy, #1782. beforeTyper to allow inferView in annotation args, SI-5892.
-              AnnotationInfo lazily beforeTyper(typer typedAnnotation ann)
+              AnnotationInfo lazily {
+                val context1 = typer.context.make(ann)
+                context1.setReportErrors()
+                beforeTyper(newTyper(context1) typedAnnotation ann)
+              }
             }
             if (ainfos.nonEmpty) {
               annotated setAnnotations ainfos
@@ -1291,7 +1288,8 @@ trait Namers extends MethodSynthesis {
           if (clazz.isDerivedValueClass) {
             log("Ensuring companion for derived value class " + name + " at " + cdef.pos.show)
             clazz setFlag FINAL
-            enclosingNamerWithScope(clazz.owner.info.decls).ensureCompanionObject(cdef)
+            // Don't force the owner's info lest we create cycles as in SI-6357.
+            enclosingNamerWithScope(clazz.owner.rawInfo.decls).ensureCompanionObject(cdef)
           }
           result
 
@@ -1445,8 +1443,12 @@ trait Namers extends MethodSynthesis {
 
       if (sym.isConstructor && sym.isAnyOverride)
         fail(OverrideConstr)
-      if (sym.isAbstractOverride && !sym.owner.isTrait)
-        fail(AbstractOverride)
+      if (sym.isAbstractOverride) {
+          if (!sym.owner.isTrait)
+            fail(AbstractOverride)
+          if(sym.isType)
+            fail(AbstractOverrideOnTypeMember)
+      }
       if (sym.isLazy && sym.hasFlag(PRESUPER))
         fail(LazyAndEarlyInit)
       if (sym.info.typeSymbol == FunctionClass(0) && sym.isValueParameter && sym.owner.isCaseClass)

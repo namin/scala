@@ -129,11 +129,10 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
     private def ErrorStaticModule(sym: Symbol) = throw new ScalaReflectionException(s"$sym is a static module, use reflectModule on a RuntimeMirror to obtain its ModuleMirror")
     private def ErrorNotMember(sym: Symbol, owner: Symbol) = throw new ScalaReflectionException(s"expected a member of $owner, you provided ${sym.kindString} ${sym.fullName}")
     private def ErrorNotField(sym: Symbol) = throw new ScalaReflectionException(s"expected a field or an accessor method symbol, you provided $sym")
-    private def ErrorNonExistentField(sym: Symbol) = throw new ScalaReflectionException(s"""
-      |Scala field ${sym.name} isn't represented as a Java field, neither it has a Java accessor method
-      |note that private parameters of class constructors don't get mapped onto fields and/or accessors,
-      |unless they are used outside of their declaring constructors.
-    """.trim.stripMargin)
+    private def ErrorNonExistentField(sym: Symbol) = throw new ScalaReflectionException(
+      sm"""Scala field ${sym.name} isn't represented as a Java field, neither it has a Java accessor method
+          |note that private parameters of class constructors don't get mapped onto fields and/or accessors,
+          |unless they are used outside of their declaring constructors.""")
     private def ErrorSetImmutableField(sym: Symbol) = throw new ScalaReflectionException(s"cannot set an immutable field ${sym.name}")
     private def ErrorNotConstructor(sym: Symbol, owner: Symbol) = throw new ScalaReflectionException(s"expected a constructor of $owner, you provided $sym")
     private def ErrorFree(member: Symbol, freeType: Symbol) = throw new ScalaReflectionException(s"cannot reflect ${member.kindString} ${member.name}, because it's a member of a weak type ${freeType.name}")
@@ -417,7 +416,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           case sym if sym.owner.isPrimitiveValueClass => invokePrimitiveMethod
           case sym if sym == Predef_classOf           => fail("Predef.classOf is a compile-time function")
           case sym if sym.isTermMacro                 => fail(s"${symbol.fullName} is a macro, i.e. a compile-time function")
-          case _                                      => assert(false, this)
+          case _                                      => abort(s"unsupported symbol $symbol when invoking $this")
         }
       }
     }
@@ -541,8 +540,8 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           val result = anns find (_.annotationType == annotClass)
           if (result.isEmpty && (anns exists (_.annotationType.getName == name)))
             throw new ClassNotFoundException(
-              s"""Mirror classloader mismatch: $jclazz (loaded by ${ReflectionUtils.show(jclazz.getClassLoader)})
-              |is unrelated to the mirror's classloader: (${ReflectionUtils.show(classLoader)})""".stripMargin)
+              sm"""Mirror classloader mismatch: $jclazz (loaded by ${ReflectionUtils.show(jclazz.getClassLoader)})
+                  |is unrelated to the mirror's classloader: (${ReflectionUtils.show(classLoader)})""")
           result
         }
       def loadBytes[T: ClassTag](name: String): Option[T] =
@@ -575,7 +574,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
               case None =>
                 // class does not have a Scala signature; it's a Java class
                 info("translating reflection info for Java " + jclazz) //debug
-                initClassModule(clazz, module, new FromJavaClassCompleter(clazz, module, jclazz))
+                initClassAndModule(clazz, module, new FromJavaClassCompleter(clazz, module, jclazz))
             }
         }
       } catch {
@@ -677,9 +676,9 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
         def enter(sym: Symbol, mods: Int) =
           (if (jModifier.isStatic(mods)) module.moduleClass else clazz).info.decls enter sym
 
-        for (jinner <- jclazz.getDeclaredClasses) {
-          enter(jclassAsScala(jinner, clazz), jinner.getModifiers)
-        }
+        for (jinner <- jclazz.getDeclaredClasses)
+          jclassAsScala(jinner) // inner class is entered as a side-effect
+                                // no need to call enter explicitly
 
         pendingLoadActions = { () =>
 
@@ -955,8 +954,8 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
             javaTypeToValueClass(jclazz) orElse lookupClass
 
         assert (cls.isType,
-          s"""${if (cls == NoSymbol) "not a type: symbol" else "no symbol could be"}
-             | loaded from $jclazz in $owner with name $simpleName and classloader $classLoader""".stripMargin)
+          sm"""${if (cls == NoSymbol) "not a type: symbol" else "no symbol could be"}
+              | loaded from $jclazz in $owner with name $simpleName and classloader $classLoader""")
 
         cls.asClass
       }
@@ -1037,14 +1036,14 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
      *  @param jclazz  The Java class
      *  @return A Scala class symbol that wraps all reflection info of `jclazz`
      */
-    private def jclassAsScala(jclazz: jClass[_]): Symbol = jclassAsScala(jclazz, sOwner(jclazz))
+    private def jclassAsScala(jclazz: jClass[_]): ClassSymbol =
+      toScala(classCache, jclazz)(_ jclassAsScala1 _)
 
-    private def jclassAsScala(jclazz: jClass[_], owner: Symbol): ClassSymbol = {
+    private def jclassAsScala1(jclazz: jClass[_]): ClassSymbol = {
+      val owner = sOwner(jclazz)
       val name = scalaSimpleName(jclazz)
       val completer = (clazz: Symbol, module: Symbol) => new FromJavaClassCompleter(clazz, module, jclazz)
-      val (clazz, module) = createClassModule(owner, name, completer)
-      classCache enter (jclazz, clazz)
-      clazz
+      initAndEnterClassAndModule(owner, name, completer)._1
     }
 
     /**

@@ -79,7 +79,7 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
     def isImplementationArtifact: Boolean = (this hasFlag BRIDGE) || (this hasFlag VBRIDGE) || (this hasFlag ARTIFACT)
     def isJava: Boolean = isJavaDefined
     def isVal: Boolean = isTerm && !isModule && !isMethod && !isMutable
-    def isVar: Boolean = isTerm && !isModule && !isMethod && isMutable
+    def isVar: Boolean = isTerm && !isModule && !isMethod && !isLazy && isMutable
 
     def newNestedSymbol(name: Name, pos: Position, newFlags: Long, isClass: Boolean): Symbol = name match {
       case n: TermName => newTermSymbol(n, pos, newFlags)
@@ -743,6 +743,9 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
     def elisionLevel        = getAnnotation(ElidableMethodClass) flatMap { _.intArg(0) }
     def implicitNotFoundMsg = getAnnotation(ImplicitNotFoundClass) flatMap { _.stringArg(0) }
 
+    def isCompileTimeOnly       = hasAnnotation(CompileTimeOnlyAttr)
+    def compileTimeOnlyMessage  = getAnnotation(CompileTimeOnlyAttr) flatMap (_ stringArg 0)
+
     /** Is this symbol an accessor method for outer? */
     final def isOuterAccessor = {
       hasFlag(STABLE | ARTIFACT) &&
@@ -1213,6 +1216,7 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
         }
         val current = phase
         try {
+          assertCorrectThread()
           phase = phaseOf(infos.validFrom)
           tp.complete(this)
         } finally {
@@ -1283,6 +1287,7 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
           infos = infos.prev
 
         if (validTo < curPeriod) {
+          assertCorrectThread()
           // adapt any infos that come from previous runs
           val current = phase
           try {
@@ -3085,7 +3090,7 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
   class RefinementClassSymbol protected[Symbols] (owner0: Symbol, pos0: Position)
   extends ClassSymbol(owner0, pos0, tpnme.REFINE_CLASS_NAME) {
     override def name_=(name: Name) {
-      assert(false, "Cannot set name of RefinementClassSymbol to " + name)
+      abort("Cannot set name of RefinementClassSymbol to " + name)
       super.name_=(name)
     }
     override def isRefinementClass       = true

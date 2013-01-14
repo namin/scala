@@ -801,8 +801,8 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
       protected def spliceApply(binder: Symbol): Tree = {
         object splice extends Transformer {
           override def transform(t: Tree) = t match {
-            case Apply(x, List(Ident(nme.SELECTOR_DUMMY))) =>
-              treeCopy.Apply(t, x, List(CODE.REF(binder)))
+            case Apply(x, List(i @ Ident(nme.SELECTOR_DUMMY))) =>
+              treeCopy.Apply(t, x, List(CODE.REF(binder).setPos(i.pos)))
             case _ => super.transform(t)
           }
         }
@@ -879,7 +879,7 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
           override def transform(tree: Tree): Tree = {
             def subst(from: List[Symbol], to: List[Tree]): Tree =
               if (from.isEmpty) tree
-              else if (tree.symbol == from.head) typedIfOrigTyped(to.head.shallowDuplicate, tree.tpe)
+              else if (tree.symbol == from.head) typedIfOrigTyped(to.head.shallowDuplicate.setPos(tree.pos), tree.tpe)
               else subst(from.tail, to.tail)
 
             tree match {
@@ -1153,7 +1153,7 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
 
           // ExplicitOuter replaces `Select(q, outerSym) OBJ_EQ expectedPrefix` by `Select(q, outerAccessor(outerSym.owner)) OBJ_EQ expectedPrefix`
           // if there's an outer accessor, otherwise the condition becomes `true` -- TODO: can we improve needsOuterTest so there's always an outerAccessor?
-          val outer = expectedTp.typeSymbol.newMethod(vpmName.outer) setInfo expectedTp.prefix setFlag SYNTHETIC | ARTIFACT
+          val outer = expectedTp.typeSymbol.newMethod(vpmName.outer, newFlags = SYNTHETIC | ARTIFACT) setInfo expectedTp.prefix
 
           (Select(codegen._asInstanceOf(testedBinder, expectedTp), outer)) OBJ_EQ expectedOuter
         }
@@ -1386,10 +1386,6 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
             t.symbol.owner = currentOwner
           case d : DefTree if (d.symbol != NoSymbol) && ((d.symbol.owner == NoSymbol) || (d.symbol.owner == origOwner)) => // don't indiscriminately change existing owners! (see e.g., pos/t3440, pos/t3534, pos/unapplyContexts2)
             patmatDebug("def: "+ (d, d.symbol.ownerChain, currentOwner.ownerChain))
-            if(d.symbol.isLazy) { // for lazy val's accessor -- is there no tree??
-              assert(d.symbol.lazyAccessor != NoSymbol && d.symbol.lazyAccessor.owner == d.symbol.owner, d.symbol.lazyAccessor)
-              d.symbol.lazyAccessor.owner = currentOwner
-            }
             if(d.symbol.moduleClass ne NoSymbol)
               d.symbol.moduleClass.owner = currentOwner
 
@@ -1419,7 +1415,7 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
 
     // assert(owner ne null); assert(owner ne NoSymbol)
     def freshSym(pos: Position, tp: Type = NoType, prefix: String = "x") =
-      NoSymbol.newTermSymbol(freshName(prefix), pos) setInfo tp
+      NoSymbol.newTermSymbol(freshName(prefix), pos, newFlags = SYNTHETIC) setInfo tp
 
     def newSynthCaseLabel(name: String) =
       NoSymbol.newLabel(freshName(name), NoPosition) setFlag treeInfo.SYNTH_CASE_FLAGS
@@ -2051,9 +2047,9 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
     // CNF: a formula is a conjunction of clauses
     type Formula = Array[Clause]
     /** Override Array creation for efficiency (to not go through reflection). */
-    private implicit val formulaTag: scala.reflect.ClassTag[Formula] = new scala.reflect.ClassTag[Formula] {
-      def runtimeClass: java.lang.Class[Formula] = classOf[Formula]
-      final override def newArray(len: Int): Array[Formula] = new Array[Formula](len)
+    private implicit val clauseTag: scala.reflect.ClassTag[Clause] = new scala.reflect.ClassTag[Clause] {
+      def runtimeClass: java.lang.Class[Clause] = classOf[Clause]
+      final override def newArray(len: Int): Array[Clause] = new Array[Clause](len)
     }
     def formula(c: Clause*): Formula = c.toArray
     def andFormula(a: Formula, b: Formula): Formula = a ++ b
@@ -3615,7 +3611,7 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
        */
       def matcher(scrut: Tree, scrutSym: Symbol, restpe: Type)(cases: List[Casegen => Tree], matchFailGen: Option[Tree => Tree]): Tree = {
         val matchEnd = newSynthCaseLabel("matchEnd")
-        val matchRes = NoSymbol.newValueParameter(newTermName("x"), NoPosition, SYNTHETIC) setInfo restpe.withoutAnnotations
+        val matchRes = NoSymbol.newValueParameter(newTermName("x"), NoPosition, newFlags = SYNTHETIC) setInfo restpe.withoutAnnotations
         matchEnd setInfo MethodType(List(matchRes), restpe)
 
         def newCaseSym = newSynthCaseLabel("case") setInfo MethodType(Nil, restpe)

@@ -44,7 +44,7 @@ trait Infer extends Checkable {
       case formal => formal
     } else formals
     if (isVarArgTypes(formals1) && (removeRepeated || formals.length != nargs)) {
-      val ft = formals1.last.normalize.typeArgs.head
+      val ft = formals1.last.dealiasWiden.typeArgs.head
       formals1.init ::: (for (i <- List.range(formals1.length - 1, nargs)) yield ft)
     } else formals1
   }
@@ -221,7 +221,7 @@ trait Infer extends Checkable {
         // such as T <: T gets completed. See #360
         tvar.constr.inst = ErrorType
       else
-        assert(false, tvar.origin+" at "+tvar.origin.typeSymbol.owner)
+        abort(tvar.origin+" at "+tvar.origin.typeSymbol.owner)
     }
     tvars map instantiate
   }
@@ -1003,22 +1003,22 @@ trait Infer extends Checkable {
 */
     /** error if arguments not within bounds. */
     def checkBounds(tree: Tree, pre: Type, owner: Symbol,
-                    tparams: List[Symbol], targs: List[Type], prefix: String): Boolean = {
-      //@M validate variances & bounds of targs wrt variances & bounds of tparams
-      //@M TODO: better place to check this?
-      //@M TODO: errors for getters & setters are reported separately
-      val kindErrors = checkKindBounds(tparams, targs, pre, owner)
-
-      if(!kindErrors.isEmpty) {
-        if (targs contains WildcardType) true
-        else { KindBoundErrors(tree, prefix, targs, tparams, kindErrors); false }
-      } else if (!isWithinBounds(pre, owner, tparams, targs)) {
-        if (!(targs exists (_.isErroneous)) && !(tparams exists (_.isErroneous))) {
-          NotWithinBounds(tree, prefix, targs, tparams, kindErrors)
-          false
-        } else true
-      } else true
-    }
+                    tparams: List[Symbol], targs: List[Type], prefix: String): Boolean =
+      if ((targs exists (_.isErroneous)) || (tparams exists (_.isErroneous))) true
+      else {
+        //@M validate variances & bounds of targs wrt variances & bounds of tparams
+        //@M TODO: better place to check this?
+        //@M TODO: errors for getters & setters are reported separately
+        val kindErrors = checkKindBounds(tparams, targs, pre, owner)
+        kindErrors match {
+          case Nil =>
+            def notWithinBounds() = NotWithinBounds(tree, prefix, targs, tparams, Nil)
+            isWithinBounds(pre, owner, tparams, targs) || {notWithinBounds(); false}
+          case errors =>
+            def kindBoundErrors() = KindBoundErrors(tree, prefix, targs, tparams, errors)
+            (targs contains WildcardType) || {kindBoundErrors(); false}
+        }
+      }
 
     def checkKindBounds(tparams: List[Symbol], targs: List[Type], pre: Type, owner: Symbol): List[String] = {
       checkKindBounds0(tparams, targs, pre, owner, true) map {
@@ -1060,15 +1060,17 @@ trait Infer extends Checkable {
      */
     def inferExprInstance(tree: Tree, tparams: List[Symbol], pt: Type = WildcardType, treeTp0: Type = null, keepNothings: Boolean = true, useWeaklyCompatible: Boolean = false): List[Symbol] = {
       val treeTp = if(treeTp0 eq null) tree.tpe else treeTp0 // can't refer to tree in default for treeTp0
+      val (targs, tvars) = exprTypeArgs(tparams, treeTp, pt, useWeaklyCompatible)
       printInference(
         ptBlock("inferExprInstance",
           "tree"    -> tree,
           "tree.tpe"-> tree.tpe,
           "tparams" -> tparams,
-          "pt"      -> pt
+          "pt"      -> pt,
+          "targs"   -> targs,
+          "tvars"   -> tvars
         )
       )
-      val (targs, tvars) = exprTypeArgs(tparams, treeTp, pt, useWeaklyCompatible)
 
       if (keepNothings || (targs eq null)) { //@M: adjustTypeArgs fails if targs==null, neg/t0226
         substExpr(tree, tparams, targs, pt)
@@ -1422,9 +1424,9 @@ trait Infer extends Checkable {
     }
 
     object approximateAbstracts extends TypeMap {
-      def apply(tp: Type): Type = tp.normalize match {
+      def apply(tp: Type): Type = tp.dealiasWiden match {
         case TypeRef(pre, sym, _) if sym.isAbstractType => WildcardType
-        case _ => mapOver(tp)
+        case _                                          => mapOver(tp)
       }
     }
 
@@ -1510,6 +1512,13 @@ trait Infer extends Checkable {
         } else if (!competing.isEmpty) {
           if (noAlternatives) NoBestExprAlternativeError(tree, pt, isSecondTry)
           else if (!pt.isErroneous) AmbiguousExprAlternativeError(tree, pre, best, competing.head, pt, isSecondTry)
+          else {
+            // SI-6912 Don't give up and leave an OverloadedType on the tree.
+            //         Originally I wrote this as `if (secondTry) ... `, but `tryTwice` won't attempt the second try
+            //         unless an error is issued. We're not issuing an error, in the assumption that it would be
+            //         spurious in light of the erroneous expected type
+            setError(tree)
+          }
         } else {
 //          val applicable = alts1 filter (alt =>
 //            global.typer.infer.isWeaklyCompatible(pre.memberType(alt), pt))
