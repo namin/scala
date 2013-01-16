@@ -107,9 +107,9 @@ trait ContextErrors {
         s"$name extends Any, not AnyRef"
     )
     if (isPrimitiveValueType(found) || isTrivialTopType(tp)) "" else "\n" +
-       s"""|Note that $what.
-           |Such types can participate in value classes, but instances
-           |cannot appear in singleton types or in reference comparisons.""".stripMargin
+       sm"""|Note that $what.
+            |Such types can participate in value classes, but instances
+            |cannot appear in singleton types or in reference comparisons."""
   }
 
   import ErrorUtils._
@@ -184,13 +184,17 @@ trait ContextErrors {
       }
 
       def ParentTypesError(templ: Template, ex: TypeError) = {
-         templ.tpe = null
-         issueNormalTypeError(templ, ex.getMessage())
+        templ.tpe = null
+        issueNormalTypeError(templ, ex.getMessage())
+        setError(templ)
       }
 
       // additional parentTypes errors
-      def ConstrArgsInTraitParentTpeError(arg: Tree, parent: Symbol) =
+      def ConstrArgsInParentWhichIsTraitError(arg: Tree, parent: Symbol) =
         issueNormalTypeError(arg, parent + " is a trait; does not take constructor arguments")
+
+      def ConstrArgsInParentOfTraitError(arg: Tree, parent: Symbol) =
+        issueNormalTypeError(arg, "parents of traits may not have parameters")
 
       def MissingTypeArgumentsParentTpeError(supertpt: Tree) =
         issueNormalTypeError(supertpt, "missing type arguments")
@@ -976,7 +980,7 @@ trait ContextErrors {
       object SymValidateErrors extends Enumeration {
         val ImplicitConstr, ImplicitNotTermOrClass, ImplicitAtToplevel,
           OverrideClass, SealedNonClass, AbstractNonClass,
-          OverrideConstr, AbstractOverride, LazyAndEarlyInit,
+          OverrideConstr, AbstractOverride, AbstractOverrideOnTypeMember, LazyAndEarlyInit,
           ByNameParameter, AbstractVar = Value
       }
 
@@ -1043,9 +1047,6 @@ trait ContextErrors {
       def MaxParametersCaseClassError(tree: Tree) =
         issueNormalTypeError(tree, "Implementation restriction: case classes cannot have more than " + definitions.MaxFunctionArity + " parameters.")
 
-      def InheritsItselfError(tree: Tree) =
-        issueNormalTypeError(tree, tree.tpe.typeSymbol+" inherits itself")
-
       def MissingParameterOrValTypeError(vparam: Tree) =
         issueNormalTypeError(vparam, "missing parameter type")
 
@@ -1077,6 +1078,9 @@ trait ContextErrors {
 
           case AbstractOverride =>
             "`abstract override' modifier only allowed for members of traits"
+
+          case AbstractOverrideOnTypeMember =>
+            "`abstract override' modifier not allowed for type members"
 
           case LazyAndEarlyInit =>
             "`lazy' definitions may not be initialized early"
@@ -1128,9 +1132,9 @@ trait ContextErrors {
                                (isView: Boolean, pt: Type, tree: Tree)(implicit context0: Context) = {
       if (!info1.tpe.isErroneous && !info2.tpe.isErroneous) {
         def coreMsg =
-           s"""| $pre1 ${info1.sym.fullLocationString} of type ${info1.tpe}
-               | $pre2 ${info2.sym.fullLocationString} of type ${info2.tpe}
-               | $trailer""".stripMargin
+           sm"""| $pre1 ${info1.sym.fullLocationString} of type ${info1.tpe}
+                | $pre2 ${info2.sym.fullLocationString} of type ${info2.tpe}
+                | $trailer"""
         def viewMsg = {
           val found :: req :: _ = pt.typeArgs
           def explanation = {
@@ -1141,19 +1145,19 @@ trait ContextErrors {
             // involving Any, are further explained from foundReqMsg.
             if (AnyRefClass.tpe <:< req) (
               if (sym == AnyClass || sym == UnitClass) (
-                 s"""|Note: ${sym.name} is not implicitly converted to AnyRef.  You can safely
-                     |pattern match `x: AnyRef` or cast `x.asInstanceOf[AnyRef]` to do so.""".stripMargin
+                 sm"""|Note: ${sym.name} is not implicitly converted to AnyRef.  You can safely
+                      |pattern match `x: AnyRef` or cast `x.asInstanceOf[AnyRef]` to do so."""
               )
               else boxedClass get sym map (boxed =>
-                 s"""|Note: an implicit exists from ${sym.fullName} => ${boxed.fullName}, but
-                     |methods inherited from Object are rendered ambiguous.  This is to avoid
-                     |a blanket implicit which would convert any ${sym.fullName} to any AnyRef.
-                     |You may wish to use a type ascription: `x: ${boxed.fullName}`.""".stripMargin
+                 sm"""|Note: an implicit exists from ${sym.fullName} => ${boxed.fullName}, but
+                      |methods inherited from Object are rendered ambiguous.  This is to avoid
+                      |a blanket implicit which would convert any ${sym.fullName} to any AnyRef.
+                      |You may wish to use a type ascription: `x: ${boxed.fullName}`."""
               ) getOrElse ""
             )
             else
-               s"""|Note that implicit conversions are not applicable because they are ambiguous:
-                   |${coreMsg}are possible conversion functions from $found to $req""".stripMargin
+               sm"""|Note that implicit conversions are not applicable because they are ambiguous:
+                    |${coreMsg}are possible conversion functions from $found to $req"""
           }
           typeErrorMsg(found, req, infer.isPossiblyMissingArgs(found, req)) + (
             if (explanation == "") "" else "\n" + explanation
@@ -1279,7 +1283,10 @@ trait ContextErrors {
       fail()
     }
 
-    private def implRefError(message: String) = genericError(methPart(macroDdef.rhs), message)
+    private def implRefError(message: String) = {
+      val treeInfo.Applied(implRef, _, _) = macroDdef.rhs
+      genericError(implRef, message)
+    }
 
     private def compatibilityError(message: String) =
       implRefError(

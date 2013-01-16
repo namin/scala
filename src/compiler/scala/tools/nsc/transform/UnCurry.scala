@@ -251,7 +251,10 @@ abstract class UnCurry extends InfoTransform
 
           val applyMethodDef = {
             val methSym = anonClass.newMethod(nme.apply, fun.pos, FINAL)
-            methSym setInfoAndEnter MethodType(methSym newSyntheticValueParams formals, restpe)
+            val paramSyms = map2(formals, fun.vparams) {
+              (tp, param) => methSym.newSyntheticValueParam(tp, param.name)
+            }
+            methSym setInfoAndEnter MethodType(paramSyms, restpe)
 
             fun.vparams foreach  (_.symbol.owner =  methSym)
             fun.body changeOwner (fun.symbol     -> methSym)
@@ -267,7 +270,7 @@ abstract class UnCurry extends InfoTransform
 
           localTyper.typedPos(fun.pos) {
             Block(
-              List(ClassDef(anonClass, NoMods, ListOfNil, ListOfNil, List(applyMethodDef), fun.pos)),
+              List(ClassDef(anonClass, NoMods, ListOfNil, List(applyMethodDef), fun.pos)),
               Typed(New(anonClass.tpe), TypeTree(fun.tpe)))
           }
 
@@ -369,7 +372,7 @@ abstract class UnCurry extends InfoTransform
       }
 
       val isDefinedAtMethodDef = {
-        val methSym = anonClass.newMethod(nme.isDefinedAt, fun.pos, FINAL)
+        val methSym = anonClass.newMethod(nme.isDefinedAt, fun.pos, FINAL | SYNTHETIC)
         val params  = methSym newSyntheticValueParams formals
         methSym setInfoAndEnter MethodType(params, BooleanClass.tpe)
 
@@ -392,7 +395,7 @@ abstract class UnCurry extends InfoTransform
 
       localTyper.typedPos(fun.pos) {
         Block(
-          List(ClassDef(anonClass, NoMods, ListOfNil, ListOfNil, List(applyOrElseMethodDef, isDefinedAtMethodDef), fun.pos)),
+          List(ClassDef(anonClass, NoMods, ListOfNil, List(applyOrElseMethodDef, isDefinedAtMethodDef), fun.pos)),
           Typed(New(anonClass.tpe), TypeTree(fun.tpe)))
       }
     }

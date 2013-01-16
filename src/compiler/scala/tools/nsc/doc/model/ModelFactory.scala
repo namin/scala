@@ -4,8 +4,8 @@ package scala.tools.nsc
 package doc
 package model
 
-import comment._
-
+import base._
+import base.comment._
 import diagram._
 
 import scala.collection._
@@ -28,7 +28,7 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
                with MemberLookup =>
 
   import global._
-  import definitions.{ ObjectClass, NothingClass, AnyClass, AnyValClass, AnyRefClass }
+  import definitions.{ ObjectClass, NothingClass, AnyClass, AnyValClass, AnyRefClass, ListClass }
   import rootMirror.{ RootPackage, RootClass, EmptyPackage }
 
   // Defaults for member grouping, that may be overridden by the template
@@ -493,28 +493,16 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
     def inheritanceDiagram = makeInheritanceDiagram(this)
     def contentDiagram = makeContentDiagram(this)
 
-    def groupSearch[T](extractor: Comment => T, default: T): T = {
-      // query this template
-      if (comment.isDefined) {
-        val entity = extractor(comment.get)
-        if (entity != default) return entity
+    def groupSearch[T](extractor: Comment => Option[T]): Option[T] = {
+      val comments = comment +: linearizationTemplates.collect { case dtpl: DocTemplateImpl => dtpl.comment }
+      comments.flatten.map(extractor).flatten.headOption orElse {
+        Option(inTpl) flatMap (_.groupSearch(extractor))
       }
-      // query linearization
-      if (!sym.isPackage)
-        for (tpl <- linearizationTemplates.collect{ case dtpl: DocTemplateImpl if dtpl!=this => dtpl}) {
-          val entity = tpl.groupSearch(extractor, default)
-          if (entity != default) return entity
-        }
-      // query inTpl, going up the ownerChain
-      if (inTpl != null)
-        inTpl.groupSearch(extractor, default)
-      else
-        default
     }
 
-    def groupDescription(group: String): Option[Body] = groupSearch(_.groupDesc.get(group), if (group == defaultGroup) defaultGroupDesc else None)
-    def groupPriority(group: String): Int = groupSearch(_.groupPrio.get(group) match { case Some(prio) => prio; case _ => 0 }, if (group == defaultGroup) defaultGroupPriority else 0)
-    def groupName(group: String): String = groupSearch(_.groupNames.get(group) match { case Some(name) => name; case _ => group }, if (group == defaultGroup) defaultGroupName else group)
+    def groupDescription(group: String): Option[Body] = groupSearch(_.groupDesc.get(group)) orElse { if (group == defaultGroup) defaultGroupDesc else None }
+    def groupPriority(group: String): Int = groupSearch(_.groupPrio.get(group)) getOrElse { if (group == defaultGroup) defaultGroupPriority else 0 }
+    def groupName(group: String): String = groupSearch(_.groupNames.get(group)) getOrElse { if (group == defaultGroup) defaultGroupName else group }
   }
 
   abstract class PackageImpl(sym: Symbol, inTpl: PackageImpl) extends DocTemplateImpl(sym, inTpl) with Package {
@@ -962,7 +950,16 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
           // units.filter should return only one element
           (currentRun.units filter (_.source.file == aSym.sourceFile)).toList match {
             case List(unit) =>
-              (unit.body find (_.symbol == aSym)) match {
+              // SI-4922 `sym == aSym` is insufficent if `aSym` is a clone of symbol
+              //         of the parameter in the tree, as can happen with type parametric methods.
+              def isCorrespondingParam(sym: Symbol) = (
+                sym != null &&
+                sym != NoSymbol &&
+                sym.owner == aSym.owner &&
+                sym.name == aSym.name &&
+                sym.isParamWithDefault
+              )
+              (unit.body find (t => isCorrespondingParam(t.symbol))) match {
                 case Some(ValDef(_,_,_,rhs)) => makeTree(rhs)
                 case _ => None
               }
@@ -1096,17 +1093,5 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
     (bSym.isAliasType || bSym.isAbstractType) &&
     { val rawComment = global.expandedDocComment(bSym, inTpl.sym)
       rawComment.contains("@template") || rawComment.contains("@documentable") }
-
-  def findExternalLink(name: String): Option[LinkTo] =
-    settings.extUrlMapping find {
-      case (pkg, _) => name startsWith pkg
-    } map {
-      case (_, url) => LinkToExternal(name, url + "#" + name)
-    }
-
-  def externalSignature(sym: Symbol) = {
-    sym.info // force it, otherwise we see lazy types
-    (sym.nameString + sym.signatureString).replaceAll("\\s", "")
-  }
 }
 

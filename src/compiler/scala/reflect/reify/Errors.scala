@@ -28,15 +28,15 @@ trait Errors {
   }
 
   def CannotReifyWeakType(details: Any) = {
-    val msg = "cannot create a TypeTag" + details
+    val msg = "cannot create a TypeTag" + details + ": use WeakTypeTag instead"
     throw new ReificationException(defaultErrorPosition, msg)
   }
 
   def CannotConvertManifestToTagWithoutScalaReflect(tpe: Type, manifestInScope: Tree) = {
-    val msg = s"""
-      |to create a type tag here, it is necessary to interoperate with the manifest `$manifestInScope` in scope.
-      |however manifest -> typetag conversion requires Scala reflection, which is not present on the classpath.
-      |to proceed put scala-reflect.jar on your compilation classpath and recompile.""".trim.stripMargin
+    val msg =
+      sm"""to create a type tag here, it is necessary to interoperate with the manifest `$manifestInScope` in scope.
+          |however manifest -> typetag conversion requires Scala reflection, which is not present on the classpath.
+          |to proceed put scala-reflect.jar on your compilation classpath and recompile."""
     throw new ReificationException(defaultErrorPosition, msg)
   }
 
@@ -70,5 +70,10 @@ trait Errors {
   def CannotReifyErroneousReifee(reifee: Any) = {
     val msg = "internal error: erroneous reifees are not supported, make sure that your reifee has typechecked successfully before passing it to the reifier"
     throw new UnexpectedReificationException(defaultErrorPosition, msg)
+  }
+
+  def CannotReifyInvalidLazyVal(tree: ValDef) = {
+    val msg = "internal error: could not reconstruct original lazy val due to missing accessor"
+    throw new UnexpectedReificationException(tree.pos, msg)
   }
 }

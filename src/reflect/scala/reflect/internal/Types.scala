@@ -146,6 +146,7 @@ trait Types extends api.Types { self: SymbolTable =>
     /** Undo all changes to constraints to type variables upto `limit`. */
     //OPT this method is public so we can do `manual inlining`
     def undoTo(limit: UndoPairs) {
+      assertCorrectThread()
       while ((log ne limit) && log.nonEmpty) {
         val (tv, constr) = log.head
         tv.constr = constr
@@ -322,6 +323,18 @@ trait Types extends api.Types { self: SymbolTable =>
     def isSpliceable = {
       this.isInstanceOf[TypeRef] && typeSymbol.isAbstractType && !typeSymbol.isExistential
     }
+  }
+
+  /** Same as a call to narrow unless existentials are visible
+   *  after widening the type. In that case, narrow from the widened
+   *  type instead of the proxy. This gives buried existentials a
+   *  chance to make peace with the other types. See SI-5330.
+   */
+  private def narrowForFindMember(tp: Type): Type = {
+    val w = tp.widen
+    // Only narrow on widened type when we have to -- narrow is expensive unless the target is a singleton type.
+    if ((tp ne w) && containsExistential(w)) w.narrow
+    else tp.narrow
   }
 
   /** The base class for all types */
@@ -1078,7 +1091,7 @@ trait Types extends api.Types { self: SymbolTable =>
                          (other ne sym) &&
                          ((other.owner eq sym.owner) ||
                           (flags & PRIVATE) != 0 || {
-                             if (self eq null) self = this.narrow
+                             if (self eq null) self = narrowForFindMember(this)
                              if (symtpe eq null) symtpe = self.memberType(sym)
                              !(self.memberType(other) matches symtpe)
                           })}) {
@@ -1160,7 +1173,7 @@ trait Types extends api.Types { self: SymbolTable =>
                   if ((member ne sym) &&
                     ((member.owner eq sym.owner) ||
                       (flags & PRIVATE) != 0 || {
-                        if (self eq null) self = this.narrow
+                        if (self eq null) self = narrowForFindMember(this)
                         if (membertpe eq null) membertpe = self.memberType(member)
                         !(membertpe matches self.memberType(sym))
                       })) {
@@ -1175,7 +1188,7 @@ trait Types extends api.Types { self: SymbolTable =>
                     (other ne sym) &&
                       ((other.owner eq sym.owner) ||
                         (flags & PRIVATE) != 0 || {
-                          if (self eq null) self = this.narrow
+                          if (self eq null) self = narrowForFindMember(this)
                           if (symtpe eq null) symtpe = self.memberType(sym)
                           !(self.memberType(other) matches symtpe)
                              })}) {
@@ -1388,7 +1401,7 @@ trait Types extends api.Types { self: SymbolTable =>
     if (!sym.isClass) {
       // SI-6640 allow StubSymbols to reveal what's missing from the classpath before we trip the assertion.
       sym.failIfStub()
-      assert(false, sym)
+      abort(s"ThisType($sym) for sym which is not a class")
     }
 
     //assert(sym.isClass && !sym.isModuleClass || sym.isRoot, sym)
@@ -6592,11 +6605,11 @@ trait Types extends api.Types { self: SymbolTable =>
       case ExistentialType(qs, _) => qs
       case t => List()
     }
-    def stripType(tp: Type) = tp match {
+    def stripType(tp: Type): Type = tp match {
       case ExistentialType(_, res) =>
         res
       case tv@TypeVar(_, constr) =>
-        if (tv.instValid) constr.inst
+        if (tv.instValid) stripType(constr.inst)
         else if (tv.untouchable) tv
         else abort("trying to do lub/glb of typevar "+tp)
       case t => t
@@ -6788,7 +6801,10 @@ trait Types extends api.Types { self: SymbolTable =>
             else lubBase
           }
         }
-      existentialAbstraction(tparams, lubType)
+      // dropRepeatedParamType is a localized fix for SI-6897. We should probably
+      // integrate that transformation at a lower level in master, but lubs are
+      // the likely and maybe only spot they escape, so fixing here for 2.10.1.
+      existentialAbstraction(tparams, dropRepeatedParamType(lubType))
     }
     if (printLubs) {
       println(indent + "lub of " + ts + " at depth "+depth)//debug
@@ -7054,7 +7070,7 @@ trait Types extends api.Types { self: SymbolTable =>
     case ExistentialType(tparams, quantified) :: rest =>
       mergePrefixAndArgs(quantified :: rest, variance, depth) map (existentialAbstraction(tparams, _))
     case _ =>
-      assert(false, tps); None
+      abort(s"mergePrefixAndArgs($tps, $variance, $depth): unsupported tps")
   }
 
   def addMember(thistp: Type, tp: Type, sym: Symbol): Unit = addMember(thistp, tp, sym, AnyDepth)

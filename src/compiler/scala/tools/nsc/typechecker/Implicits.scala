@@ -149,9 +149,20 @@ trait Implicits extends SourceContextUtils {
   class SearchResult(val tree: Tree, val subst: TreeTypeSubstituter) {
     override def toString = "SearchResult(%s, %s)".format(tree,
       if (subst.isEmpty) "" else subst)
+    
+    def isFailure          = false
+    def isAmbiguousFailure = false
+    final def isSuccess    = !isFailure
   }
 
-  lazy val SearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter)
+  lazy val SearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter) {
+    override def isFailure = true
+  }
+  
+  lazy val AmbiguousSearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter) {
+    override def isFailure          = true
+    override def isAmbiguousFailure = true
+  }
 
   /** A class that records an available implicit
    *  @param   name   The name of the implicit
@@ -831,7 +842,7 @@ trait Implicits extends SourceContextUtils {
             catch divergenceHandler
 
           tryImplicitInfo(i) match {
-            case SearchFailure  =>
+            case sr if sr.isFailure =>
               // We don't want errors that occur during checking implicit info
               // to influence the check of further infos.
               context.condBufferFlush(_.kind != ErrorKinds.Divergent)
@@ -871,14 +882,14 @@ trait Implicits extends SourceContextUtils {
             rest find (alt => !improves(chosen, alt)) match {
               case Some(competing)  =>
                 AmbiguousImplicitError(chosen, competing, "both", "and", "")(isView, pt, tree)(context)
-                return SearchFailure // Stop the search once ambiguity is encountered, see t4457_2.scala
+                return AmbiguousSearchFailure // Stop the search once ambiguity is encountered, see t4457_2.scala
               case _                =>
                 if (isView) chosen.useCountView += 1
                 else chosen.useCountArg += 1
             }
         }
 
-        if (best == SearchFailure) {
+        if (best.isFailure) {
           /** If there is no winner, and we witnessed and caught divergence,
            *  now we can throw it for the error message.
            */
@@ -935,8 +946,8 @@ trait Implicits extends SourceContextUtils {
      *    - for alias types and abstract types, we take instead the parts
      *    - of their upper bounds.
      *  @return For those parts that refer to classes with companion objects that
-     *  can be accessed with unambiguous stable prefixes, the implicits infos
-     *  which are members of these companion objects.
+     *  can be accessed with unambiguous stable prefixes that are not existentially
+     *  bound, the implicits infos which are members of these companion objects.
      */
     private def companionImplicitMap(tp: Type): InfoMap = {
 
@@ -952,7 +963,7 @@ trait Implicits extends SourceContextUtils {
                 infoMap(sym) = List() // ambiguous prefix - ignore implicit members
               }
             case None =>
-              if (pre.isStable) {
+              if (pre.isStable && !pre.typeSymbol.isExistentiallyBound) {
                 val companion = companionSymbolOf(sym, context)
                 companion.moduleClass match {
                   case mc: ModuleClassSymbol =>
@@ -1318,17 +1329,17 @@ trait Implicits extends SourceContextUtils {
         else {
           if (ReflectRuntimeUniverse == NoSymbol) {
             // todo. write a test for this
-            context.error(pos, s"""
-              |to create a manifest here, it is necessary to interoperate with the type tag `$tagInScope` in scope.
-              |however typetag -> manifest conversion requires Scala reflection, which is not present on the classpath.
-              |to proceed put scala-reflect.jar on your compilation classpath and recompile.""".trim.stripMargin)
+            context.error(pos,
+              sm"""to create a manifest here, it is necessary to interoperate with the type tag `$tagInScope` in scope.
+                  |however typetag -> manifest conversion requires Scala reflection, which is not present on the classpath.
+                  |to proceed put scala-reflect.jar on your compilation classpath and recompile.""")
             return SearchFailure
           }
           if (resolveClassTag(pos, tp, allowMaterialization = true) == EmptyTree) {
-            context.error(pos, s"""
-              |to create a manifest here, it is necessary to interoperate with the type tag `$tagInScope` in scope.
-              |however typetag -> manifest conversion requires a class tag for the corresponding type to be present.
-              |to proceed add a class tag to the type `$tp` (e.g. by introducing a context bound) and recompile.""".trim.stripMargin)
+            context.error(pos,
+              sm"""to create a manifest here, it is necessary to interoperate with the type tag `$tagInScope` in scope.
+                  |however typetag -> manifest conversion requires a class tag for the corresponding type to be present.
+                  |to proceed add a class tag to the type `$tp` (e.g. by introducing a context bound) and recompile.""")
             return SearchFailure
           }
           val cm = typed(Ident(ReflectRuntimeCurrentMirror))
@@ -1392,24 +1403,25 @@ trait Implicits extends SourceContextUtils {
       // invoke update on implicitly found SourceContext
       var updateSourceContext = true
 
-      if (result == SearchFailure) {
+      if (result.isFailure) {
         if (Statistics.canEnable) Statistics.stopTimer(inscopeFailNanos, failstart)
       } else {
         if (Statistics.canEnable) Statistics.stopTimer(inscopeSucceedNanos, succstart)
         if (Statistics.canEnable) Statistics.incCounter(inscopeImplicitHits)
       }
-      if (result == SearchFailure) {
+      if (result.isFailure) {
         val previousErrs = context.flushAndReturnBuffer()
         val failstart = if (Statistics.canEnable) Statistics.startTimer(oftypeFailNanos) else null
         val succstart = if (Statistics.canEnable) Statistics.startTimer(oftypeSucceedNanos) else null
 
+        val wasAmbigious = result.isAmbiguousFailure // SI-6667, never search companions after an ambiguous error in in-scope implicits
         result = materializeImplicit(pt)
 
         // `materializeImplicit` does some preprocessing for `pt`
         // is it only meant for manifests/tags or we need to do the same for `implicitsOfExpectedType`?
-        if (result == SearchFailure) result = searchImplicit(implicitsOfExpectedType, false)
+        if (result.isFailure && !wasAmbigious) result = searchImplicit(implicitsOfExpectedType, false)
 
-        if (result == SearchFailure) {
+        if (result.isFailure) {
           pt.dealias match {
             case TypeRef(_, SourceContextClass, _) =>
               // construct new SourceContext instance
@@ -1426,7 +1438,7 @@ trait Implicits extends SourceContextUtils {
         }
       }
 
-      if (result == SearchFailure && settings.debug.value)
+      if (result.isFailure && settings.debug.value)
         log("no implicits found for "+pt+" "+pt.typeSymbol.info.baseClasses+" "+implicitsOfExpectedType)
 
       updatedWithSourceContext(this, tree, pt, context0, result, updateSourceContext)
