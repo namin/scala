@@ -4249,7 +4249,7 @@ trait Typers extends Modes with Adaptations with Tags {
             case _ if matches(t)                  => Some((nme.selectDynamic, t))
             case _                                => t.children flatMap findSelection headOption
           }
-          findSelection(cxTree) match {
+          findSelection(if (tp ne NoType) tree else cxTree) match {
             case Some((opName, treeInfo.Applied(_, targs, _))) =>
               val sel = Select(qual, opName)
               val fun = gen.mkTypeApply(sel, if (tp ne NoType) List(TypeTree(tp)) else targs)
