@@ -234,6 +234,20 @@ abstract class TreeInfo {
       tree
   }
 
+  /** Strips layers of `.asInstanceOf[T]` / `_.$asInstanceOf[T]()` from an expression */
+  def stripCast(tree: Tree): Tree = tree match {
+    case TypeApply(sel @ Select(inner, _), _) if isCastSymbol(sel.symbol) =>
+      stripCast(inner)
+    case Apply(TypeApply(sel @ Select(inner, _), _), Nil) if isCastSymbol(sel.symbol) =>
+      stripCast(inner)
+    case t =>
+      t
+  }
+
+  object StripCast {
+    def unapply(tree: Tree): Some[Tree] = Some(stripCast(tree))
+  }
+
   /** Is tree a self or super constructor call? */
   def isSelfOrSuperConstrCall(tree: Tree) = {
     // stripNamedApply for SI-3584: adaptToImplicitMethod in Typers creates a special context
@@ -247,22 +261,24 @@ abstract class TreeInfo {
    * in the position `for { <tree> <- expr }` based only
    * on information at the `parser` phase? To qualify, there
    * may be no subtree that will be interpreted as a
-   * Stable Identifier Pattern.
+   * Stable Identifier Pattern, nor any type tests, even
+   * on TupleN. See SI-6968.
    *
    * For instance:
    *
    * {{{
-   * foo @ (bar, (baz, quux))
+   * (foo @ (bar @ _)) = 0
    * }}}
    *
-   * is a variable pattern; if the structure matches,
-   * then the remainder is inevitable.
+   * is a not a variable pattern; if only binds names.
    *
    * The following are not variable patterns.
    *
    * {{{
-   *   foo @ (bar, (`baz`, quux)) // back quoted ident, not at top level
-   *   foo @ (bar, Quux)          // UpperCase ident, not at top level
+   *   `bar`
+   *   Bar
+   *   (a, b)
+   *   _: T
    * }}}
    *
    * If the pattern is a simple identifier, it is always
@@ -291,10 +307,6 @@ abstract class TreeInfo {
       tree match {
         case Bind(name, pat)  => isVarPatternDeep0(pat)
         case Ident(name)      => isVarPattern(tree)
-        case Apply(sel, args) =>
-          (    isReferenceToScalaMember(sel, TupleClass(args.size).name.toTermName)
-            && (args forall isVarPatternDeep0)
-            )
         case _                => false
       }
     }

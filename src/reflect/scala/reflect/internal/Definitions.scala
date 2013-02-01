@@ -351,12 +351,13 @@ trait Definitions extends api.StandardDefinitions {
     lazy val PredefModule      = requiredModule[scala.Predef.type]
     lazy val PredefModuleClass = PredefModule.moduleClass
 
-      def Predef_classOf      = getMemberMethod(PredefModule, nme.classOf)
-      def Predef_identity     = getMemberMethod(PredefModule, nme.identity)
-      def Predef_conforms     = getMemberMethod(PredefModule, nme.conforms)
-      def Predef_wrapRefArray = getMemberMethod(PredefModule, nme.wrapRefArray)
-      def Predef_???          = getMemberMethod(PredefModule, nme.???)
-      def Predef_implicitly   = getMemberMethod(PredefModule, nme.implicitly)
+      def Predef_classOf             = getMemberMethod(PredefModule, nme.classOf)
+      def Predef_identity            = getMemberMethod(PredefModule, nme.identity)
+      def Predef_conforms            = getMemberMethod(PredefModule, nme.conforms)
+    def Predef_wrapRefArray        = getMemberMethod(PredefModule, nme.wrapRefArray)
+    def Predef_wrapArray(tp: Type) = getMemberMethod(PredefModule, wrapArrayMethodName(tp))
+    def Predef_???                 = getMemberMethod(PredefModule, nme.???)
+    def Predef_implicitly          = getMemberMethod(PredefModule, nme.implicitly)
 
     /** Is `sym` a member of Predef with the given name?
      *  Note: DON't replace this by sym == Predef_conforms/etc, as Predef_conforms is a `def`
@@ -480,6 +481,8 @@ trait Definitions extends api.StandardDefinitions {
     // arrays and their members
     lazy val ArrayModule                   = requiredModule[scala.Array.type]
       lazy val ArrayModule_overloadedApply = getMemberMethod(ArrayModule, nme.apply)
+           def ArrayModule_genericApply    = ArrayModule_overloadedApply.suchThat(_.paramss.flatten.last.tpe.typeSymbol == ClassTagClass) // [T: ClassTag](xs: T*): Array[T]
+           def ArrayModule_apply(tp: Type) = ArrayModule_overloadedApply.suchThat(_.tpe.resultType =:= arrayType(tp)) // (p1: AnyVal1, ps: AnyVal1*): Array[AnyVal1]
     lazy val ArrayClass                    = getRequiredClass("scala.Array") // requiredClass[scala.Array[_]]
       lazy val Array_apply                 = getMemberMethod(ArrayClass, nme.apply)
       lazy val Array_update                = getMemberMethod(ArrayClass, nme.update)
@@ -554,10 +557,12 @@ trait Definitions extends api.StandardDefinitions {
     lazy val ScalaLongSignatureAnnotation = requiredClass[scala.reflect.ScalaLongSignature]
 
     // Option classes
-    lazy val OptionClass: ClassSymbol = requiredClass[Option[_]]
-    lazy val SomeClass: ClassSymbol   = requiredClass[Some[_]]
-    lazy val NoneModule: ModuleSymbol = requiredModule[scala.None.type]
-    lazy val SomeModule: ModuleSymbol = requiredModule[scala.Some.type]
+    lazy val OptionClass: ClassSymbol   = requiredClass[Option[_]]
+    lazy val OptionModule: ModuleSymbol = requiredModule[scala.Option.type]
+      lazy val Option_apply             = getMemberMethod(OptionModule, nme.apply)
+    lazy val SomeClass: ClassSymbol     = requiredClass[Some[_]]
+    lazy val NoneModule: ModuleSymbol   = requiredModule[scala.None.type]
+    lazy val SomeModule: ModuleSymbol   = requiredModule[scala.Some.type]
 
     def compilerTypeFromTag(tt: ApiUniverse # WeakTypeTag[_]): Type = tt.in(rootMirror).tpe
     def compilerSymbolFromTag(tt: ApiUniverse # WeakTypeTag[_]): Symbol = tt.in(rootMirror).tpe.typeSymbol

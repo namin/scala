@@ -728,7 +728,15 @@ trait Typers extends Modes with Adaptations with Tags {
           if (context1.hasErrors) {
             stopStats()
             SilentTypeError(context1.errBuffer.head)
-          } else SilentResultValue(result)
+          } else {
+            // If we have a successful result, emit any warnings it created.
+            if (context1.hasWarnings) {
+              context1.flushAndReturnWarningsBuffer() foreach {
+                case (pos, msg) => unit.warning(pos, msg)
+              }
+            }
+            SilentResultValue(result)
+          }
         } else {
           assert(context.bufferErrors || isPastTyper, "silent mode is not available past typer")
           withSavedContext(context){
@@ -1444,7 +1452,7 @@ trait Typers extends Modes with Adaptations with Tags {
           case DefDef(_, name, _, _, _, rhs) =>
             if (stat.symbol.isAuxiliaryConstructor)
               notAllowed("secondary constructor")
-            else if (isValueClass && (name == nme.equals_ || name == nme.hashCode_))
+            else if (isValueClass && (name == nme.equals_ || name == nme.hashCode_) && !stat.symbol.isSynthetic)
               notAllowed(s"redefinition of $name method. See SIP-15, criterion 4.")
             else if (stat.symbol != null && stat.symbol.isParamAccessor)
               notAllowed("additional parameter")
@@ -1740,8 +1748,8 @@ trait Typers extends Modes with Adaptations with Tags {
      */
     def validateParentClasses(parents: List[Tree], selfType: Type) {
       val pending = ListBuffer[AbsTypeError]()
-      def validateDynamicParent(parent: Symbol) =
-        if (parent == DynamicClass) checkFeature(parent.pos, DynamicsFeature)
+      def validateDynamicParent(parent: Symbol, parentPos: Position) =
+        if (parent == DynamicClass) checkFeature(parentPos, DynamicsFeature)
 
       def validateParentClass(parent: Tree, superclazz: Symbol) =
         if (!parent.isErrorTyped) {
@@ -1791,7 +1799,7 @@ trait Typers extends Modes with Adaptations with Tags {
           if (parents exists (p => p != parent && p.tpe.typeSymbol == psym && !psym.isError))
             pending += ParentInheritedTwiceError(parent, psym)
 
-          validateDynamicParent(psym)
+          validateDynamicParent(psym, parent.pos)
         }
 
       if (!parents.isEmpty && parents.forall(!_.isErrorTyped)) {
@@ -1904,7 +1912,7 @@ trait Typers extends Modes with Adaptations with Tags {
         })
       }
       val impl2  = finishMethodSynthesis(impl1, clazz, context)
-      
+
       // SI-5954. On second compile of a companion class contained in a package object we end up
       // with some confusion of names which leads to having two symbols with the same name in the
       // same owner. Until that can be straightened out we can't allow companion objects in package
@@ -1917,20 +1925,20 @@ trait Typers extends Modes with Adaptations with Tags {
           // can't handle case classes in package objects
           if (m.isCaseClass) pkgObjectRestriction(m, mdef, "case")
           // can't handle companion class/object pairs in package objects
-          else if ((m.isClass && m.companionModule != NoSymbol && !m.companionModule.isSynthetic) || 
-                   (m.isModule && m.companionClass != NoSymbol && !m.companionClass.isSynthetic)) 
+          else if ((m.isClass && m.companionModule != NoSymbol && !m.companionModule.isSynthetic) ||
+                   (m.isModule && m.companionClass != NoSymbol && !m.companionClass.isSynthetic))
                      pkgObjectRestriction(m, mdef, "companion")
         }
 
         def pkgObjectRestriction(m : Symbol, mdef : ModuleDef, restricted : String) = {
           val pkgName = mdef.symbol.ownerChain find (_.isPackage) map (_.decodedName) getOrElse mdef.symbol.toString
           context.error(if (m.pos.isDefined) m.pos else mdef.pos, s"implementation restriction: package object ${pkgName} cannot contain ${restricted} ${m}. Instead, ${m} should be placed directly in package ${pkgName}.")
-        }          
+        }
       }
 
       if (!settings.companionsInPkgObjs.value && mdef.symbol.isPackageObject)
         restrictPackageObjectMembers(mdef)
-      
+
       treeCopy.ModuleDef(mdef, typedMods, mdef.name, impl2) setType NoType
     }
     /** In order to override this in the TreeCheckers Typer so synthetics aren't re-added
@@ -2068,12 +2076,9 @@ trait Typers extends Modes with Adaptations with Tags {
       var tpt1 = checkNoEscaping.privates(sym, typer1.typedType(vdef.tpt))
       checkNonCyclic(vdef, tpt1)
 
-      if (sym.hasAnnotation(definitions.VolatileAttr)) {
-        if (!sym.isMutable)
-          VolatileValueError(vdef)
-        else if (sym.isFinal)
-          FinalVolatileVarError(vdef)
-      }
+      if (sym.hasAnnotation(definitions.VolatileAttr) && !sym.isMutable)
+        VolatileValueError(vdef)
+
       val rhs1 =
         if (vdef.rhs.isEmpty) {
           if (sym.isVariable && sym.owner.isTerm && !sym.isLazy && !isPastTyper)
@@ -2214,37 +2219,58 @@ trait Typers extends Modes with Adaptations with Tags {
      */
     def checkMethodStructuralCompatible(ddef: DefDef): Unit = {
       val meth = ddef.symbol
-      def fail(pos: Position, msg: String) = unit.error(pos, msg)
-      val tp: Type = meth.tpe match {
-        case mt @ MethodType(_, _)     => mt
-        case NullaryMethodType(restpe) => restpe  // TODO_NMT: drop NullaryMethodType from resultType?
-        case PolyType(_, restpe)       => restpe
-        case _                         => NoType
+      def parentString = meth.owner.parentSymbols filterNot (_ == ObjectClass) match {
+        case Nil => ""
+        case xs  => xs.map(_.nameString).mkString(" (of ", " with ", ")")
       }
-      def nthParamPos(n: Int) = ddef.vparamss match {
-        case xs :: _ if xs.length > n => xs(n).pos
-        case _                        => meth.pos
+      def fail(pos: Position, msg: String): Boolean = {
+        unit.error(pos, msg)
+        false
       }
-      def failStruct(pos: Position, what: String, where: String = "Parameter") =
-        fail(pos, s"$where type in structural refinement may not refer to $what")
+      /** Have to examine all parameters in all lists.
+       */
+      def paramssTypes(tp: Type): List[List[Type]] = tp match {
+        case mt @ MethodType(_, restpe) => mt.paramTypes :: paramssTypes(restpe)
+        case PolyType(_, restpe)        => paramssTypes(restpe)
+        case _                          => Nil
+      }
+      def resultType = meth.tpe.finalResultType
+      def nthParamPos(n1: Int, n2: Int) =
+        try ddef.vparamss(n1)(n2).pos catch { case _: IndexOutOfBoundsException => meth.pos }
 
-      foreachWithIndex(tp.paramTypes) { (paramType, idx) =>
-        val sym = paramType.typeSymbol
-        def paramPos = nthParamPos(idx)
+      def failStruct(pos: Position, what: String, where: String = "Parameter type") =
+        fail(pos, s"$where in structural refinement may not refer to $what")
 
-        if (sym.isAbstractType) {
-          if (!sym.hasTransOwner(meth.owner))
-            failStruct(paramPos, "an abstract type defined outside that refinement")
-          else if (!sym.hasTransOwner(meth))
-            failStruct(paramPos, "a type member of that refinement")
+      foreachWithIndex(paramssTypes(meth.tpe)) { (paramList, listIdx) =>
+        foreachWithIndex(paramList) { (paramType, paramIdx) =>
+          val sym = paramType.typeSymbol
+          def paramPos = nthParamPos(listIdx, paramIdx)
+
+          /** Not enough to look for abstract types; have to recursively check the bounds
+           *  of each abstract type for more abstract types. Almost certainly there are other
+           *  exploitable type soundness bugs which can be seen by bounding a type parameter
+           *  by an abstract type which itself is bounded by an abstract type.
+           */
+          def checkAbstract(tp0: Type, what: String): Boolean = {
+            def check(sym: Symbol): Boolean = !sym.isAbstractType || {
+              log(s"""checking $tp0 in refinement$parentString at ${meth.owner.owner.fullLocationString}""")
+              (    (!sym.hasTransOwner(meth.owner) && failStruct(paramPos, "an abstract type defined outside that refinement", what))
+                || (!sym.hasTransOwner(meth) && failStruct(paramPos, "a type member of that refinement", what))
+                || checkAbstract(sym.info.bounds.hi, "Type bound")
+              )
+            }
+            tp0.dealiasWidenChain forall (t => check(t.typeSymbol))
+          }
+          checkAbstract(paramType, "Parameter type")
+
+          if (sym.isDerivedValueClass)
+            failStruct(paramPos, "a user-defined value class")
+          if (paramType.isInstanceOf[ThisType] && sym == meth.owner)
+            failStruct(paramPos, "the type of that refinement (self type)")
         }
-        if (sym.isDerivedValueClass)
-          failStruct(paramPos, "a user-defined value class")
-        if (paramType.isInstanceOf[ThisType] && sym == meth.owner)
-          failStruct(paramPos, "the type of that refinement (self type)")
       }
-      if (tp.resultType.typeSymbol.isDerivedValueClass)
-        failStruct(ddef.tpt.pos, "a user-defined value class", where = "Result")
+      if (resultType.typeSymbol.isDerivedValueClass)
+        failStruct(ddef.tpt.pos, "a user-defined value class", where = "Result type")
     }
 
     def typedUseCase(useCase: UseCase) {
@@ -5871,7 +5897,7 @@ trait Typers extends Modes with Adaptations with Tags {
         var block1 = typed(tree.block, pt)
         var catches1 = typedCases(tree.catches, ThrowableClass.tpe, pt)
 
-        for (cdef <- catches1 if cdef.guard.isEmpty) {
+        for (cdef <- catches1 if !isPastTyper && cdef.guard.isEmpty) {
           def warn(name: Name) = context.warning(cdef.pat.pos, s"This catches all Throwables. If this is really intended, use `case ${name.decoded} : Throwable` to clear this warning.")
           def unbound(t: Tree) = t.symbol == null || t.symbol == NoSymbol
           cdef.pat match {

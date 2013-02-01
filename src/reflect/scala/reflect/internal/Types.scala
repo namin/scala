@@ -22,6 +22,8 @@ import util.ThreeValues._
     // internal: error
   case WildcardType =>
     // internal: unknown
+  case BoundedWildcardType(bounds) =>
+    // internal: unknown
   case NoType =>
   case NoPrefix =>
   case ThisType(sym) =>
@@ -744,7 +746,7 @@ trait Types extends api.Types { self: SymbolTable =>
         val trivial = (
              this.isTrivial
           || phase.erasedTypes && pre.typeSymbol != ArrayClass
-          || pre.normalize.isTrivial && !isPossiblePrefix(clazz)
+          || skipPrefixOf(pre, clazz)
         )
         if (trivial) this
         else {
@@ -2481,8 +2483,10 @@ trait Types extends api.Types { self: SymbolTable =>
           // from (T1, T2) => R.
           targs match {
             case in :: out :: Nil if !isTupleType(in) =>
-              // A => B => C should be (A => B) => C or A => (B => C)
-              val in_s  = if (isFunctionType(in)) "(" + in + ")" else "" + in
+              // A => B => C should be (A => B) => C or A => (B => C).
+              // Also if A is byname, then we want (=> A) => B because => is right associative and => A => B
+              // would mean => (A => B) which is a different type
+              val in_s  = if (isFunctionType(in) || isByNameParamType(in)) "(" + in + ")" else "" + in
               val out_s = if (isFunctionType(out)) "(" + out + ")" else "" + out
               in_s + " => " + out_s
             case xs =>
@@ -3588,12 +3592,6 @@ trait Types extends api.Types { self: SymbolTable =>
     val pre1 = pre match {
       case x: SuperType if sym1.isEffectivelyFinal || sym1.isDeferred =>
         x.thistpe
-      case _: CompoundType if sym1.isClass =>
-        // sharpen prefix so that it is maximal and still contains the class.
-        pre.parents.reverse dropWhile (_.member(sym1.name) != sym1) match {
-          case Nil         => pre
-          case parent :: _ => parent
-        }
       case _ => pre
     }
     if (pre eq pre1)                                TypeRef(pre, sym1, args)
@@ -3850,12 +3848,16 @@ trait Types extends api.Types { self: SymbolTable =>
   //   This is the specified behavior.
   protected def etaExpandKeepsStar = false
 
+  /** Turn any T* types into Seq[T] except when
+   *  in method parameter position.
+   */
   object dropRepeatedParamType extends TypeMap {
     def apply(tp: Type): Type = tp match {
       case MethodType(params, restpe) =>
-        MethodType(params, apply(restpe))
-      case PolyType(tparams, restpe) =>
-        PolyType(tparams, apply(restpe))
+        // Not mapping over params
+        val restpe1 = apply(restpe)
+        if (restpe eq restpe1) tp
+        else MethodType(params, restpe1)
       case TypeRef(_, RepeatedParamClass, arg :: Nil) =>
         seqType(arg)
       case _ =>
@@ -4467,14 +4469,15 @@ trait Types extends api.Types { self: SymbolTable =>
    */
   def isPossiblePrefix(clazz: Symbol) = clazz.isClass && !clazz.isPackageClass
 
+  private def skipPrefixOf(pre: Type, clazz: Symbol) = (
+    (pre eq NoType) || (pre eq NoPrefix) || !isPossiblePrefix(clazz)
+  )
+
   /** A map to compute the asSeenFrom method  */
   class AsSeenFromMap(pre: Type, clazz: Symbol) extends TypeMap with KeepOnlyTypeConstraints {
     var capturedSkolems: List[Symbol] = List()
     var capturedParams: List[Symbol] = List()
 
-    private def skipPrefixOf(pre: Type, clazz: Symbol) = (
-      (pre eq NoType) || (pre eq NoPrefix) || !isPossiblePrefix(clazz)
-    )
     override def mapOver(tree: Tree, giveup: ()=>Nothing): Tree = {
       object annotationArgRewriter extends TypeMapTransformer {
         private def canRewriteThis(sym: Symbol) = (
@@ -4507,8 +4510,7 @@ trait Types extends api.Types { self: SymbolTable =>
     }
 
     def apply(tp: Type): Type =
-      if (skipPrefixOf(pre, clazz)) tp
-      else tp match {
+      tp match {
         case ThisType(sym) =>
           def toPrefix(pre: Type, clazz: Symbol): Type =
             if (skipPrefixOf(pre, clazz)) tp
@@ -4670,6 +4672,8 @@ trait Types extends api.Types { self: SymbolTable =>
 
   /** A map to implement the `substSym` method. */
   class SubstSymMap(from: List[Symbol], to: List[Symbol]) extends SubstMap(from, to) {
+    def this(pairs: (Symbol, Symbol)*) = this(pairs.toList.map(_._1), pairs.toList.map(_._2))
+
     protected def toType(fromtp: Type, sym: Symbol) = fromtp match {
       case TypeRef(pre, _, args) => copyTypeRef(fromtp, pre, sym, args)
       case SingleType(pre, _) => singleType(pre, sym)
@@ -7110,6 +7114,14 @@ trait Types extends api.Types { self: SymbolTable =>
     }
   }
 
+  def isJavaVarargsAncestor(clazz: Symbol) = (
+       clazz.isClass
+    && clazz.isJavaDefined
+    && (clazz.info.nonPrivateDecls exists isJavaVarArgsMethod)
+  )
+  def inheritsJavaVarArgsMethod(clazz: Symbol) =
+    clazz.thisType.baseClasses exists isJavaVarargsAncestor
+
   /** All types in list must be polytypes with type parameter lists of
    *  same length as tparams.
    *  Returns list of list of bounds infos, where corresponding type
@@ -7221,6 +7233,12 @@ trait Types extends api.Types { self: SymbolTable =>
     if (ps exists typeIsSubTypeOfSerializable) ps.toList
     else (ps :+ SerializableClass.tpe).toList
   )
+
+  /** Members of the given class, other than those inherited
+   *  from Any or AnyRef.
+   */
+  def nonTrivialMembers(clazz: Symbol): Iterable[Symbol] =
+    clazz.info.members filterNot (sym => sym.owner == ObjectClass || sym.owner == AnyClass)
 
   def objToAny(tp: Type): Type =
     if (!phase.erasedTypes && tp.typeSymbol == ObjectClass) AnyClass.tpe

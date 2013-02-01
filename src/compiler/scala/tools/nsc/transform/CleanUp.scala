@@ -15,6 +15,7 @@ abstract class CleanUp extends Transform with ast.TreeDSL {
   import global._
   import definitions._
   import CODE._
+  import treeInfo.StripCast
 
   /** the following two members override abstract members in Transform */
   val phaseName: String = "cleanup"
@@ -206,12 +207,17 @@ abstract class CleanUp extends Transform with ast.TreeDSL {
                 var reflPoly$Cache: SoftReference[scala.runtime.MethodCache] = new SoftReference(new EmptyMethodCache())
 
                 def reflMethod$Method(forReceiver: JClass[_]): JMethod = {
-                  var method: JMethod = reflPoly$Cache.find(forReceiver)
-                  if (method != null)
+                  var methodCache: MethodCache = reflPoly$Cache.find(forReceiver)
+                  if (methodCache eq null) {
+                    methodCache = new EmptyMethodCache
+                    reflPoly$Cache = new SoftReference(methodCache)
+                  }
+                  var method: JMethod = methodCache.find(forReceiver)
+                  if (method ne null)
                     return method
                   else {
                     method = ScalaRunTime.ensureAccessible(forReceiver.getMethod("xyz", reflParams$Cache))
-                    reflPoly$Cache = new SoftReference(reflPoly$Cache.get.add(forReceiver, method))
+                    reflPoly$Cache = new SoftReference(methodCache.add(forReceiver, method))
                     return method
                   }
                 }
@@ -228,16 +234,22 @@ abstract class CleanUp extends Transform with ast.TreeDSL {
               def getPolyCache = gen.mkCast(fn(REF(reflPolyCacheSym), nme.get), MethodCacheClass.tpe)
 
               addStaticMethodToClass((reflMethodSym, forReceiverSym) => {
+                val methodCache = reflMethodSym.newVariable(mkTerm("methodCache"), ad.pos) setInfo MethodCacheClass.tpe
                 val methodSym = reflMethodSym.newVariable(mkTerm("method"), ad.pos) setInfo MethodClass.tpe
 
                 BLOCK(
-                  IF (getPolyCache OBJ_EQ NULL) THEN (REF(reflPolyCacheSym) === mkNewPolyCache) ENDIF,
-                  VAL(methodSym) === ((getPolyCache DOT methodCache_find)(REF(forReceiverSym))) ,
-                  IF (REF(methodSym) OBJ_!= NULL) .
+                  VAR(methodCache) === getPolyCache,
+                  IF (REF(methodCache) OBJ_EQ NULL) THEN BLOCK(
+                    REF(methodCache) === NEW(TypeTree(EmptyMethodCacheClass.tpe)),
+                    REF(reflPolyCacheSym) === gen.mkSoftRef(REF(methodCache))
+                  ) ENDIF,
+
+                  VAR(methodSym) === (REF(methodCache) DOT methodCache_find)(REF(forReceiverSym)),
+                  IF (REF(methodSym) OBJ_NE NULL) .
                     THEN (Return(REF(methodSym)))
                   ELSE {
                     def methodSymRHS  = ((REF(forReceiverSym) DOT Class_getMethod)(LIT(method), REF(reflParamsCacheSym)))
-                    def cacheRHS      = ((getPolyCache DOT methodCache_add)(REF(forReceiverSym), REF(methodSym)))
+                    def cacheRHS      = ((REF(methodCache) DOT methodCache_add)(REF(forReceiverSym), REF(methodSym)))
                     BLOCK(
                       REF(methodSym)        === (REF(ensureAccessibleMethod) APPLY (methodSymRHS)),
                       REF(reflPolyCacheSym) === gen.mkSoftRef(cacheRHS),
@@ -246,6 +258,7 @@ abstract class CleanUp extends Transform with ast.TreeDSL {
                   }
                 )
               })
+
         }
 
         /* ### HANDLING METHODS NORMALLY COMPILED TO OPERATORS ### */
@@ -437,19 +450,31 @@ abstract class CleanUp extends Transform with ast.TreeDSL {
            *   is a value type (int et al.) in which case it must cast to the boxed version
            *   because invoke only returns object and erasure made sure the result is
            *   expected to be an AnyRef. */
-          val t: Tree = ad.symbol.tpe match {
-            case MethodType(mparams, resType) =>
-              assert(params.length == mparams.length, mparams)
+          val t: Tree = {
+            val (mparams, resType) = ad.symbol.tpe match {
+              case MethodType(mparams, resType) =>
+                assert(params.length == mparams.length, ((params, mparams)))
+                (mparams, resType)
+              case tpe @ OverloadedType(pre, alts) =>
+                unit.warning(ad.pos, s"Overloaded type reached the backend! This is a bug in scalac.\n     Symbol: ${ad.symbol}\n  Overloads: $tpe\n  Arguments: " + ad.args.map(_.tpe))
+                alts filter (_.paramss.flatten.size == params.length) map (_.tpe) match {
+                  case mt @ MethodType(mparams, resType) :: Nil =>
+                    unit.warning(NoPosition, "Only one overload has the right arity, proceeding with overload " + mt)
+                    (mparams, resType)
+                  case _ =>
+                    unit.error(ad.pos, "Cannot resolve overload.")
+                    (Nil, NoType)
+                }
+            }
+            typedPos {
+              val sym = currentOwner.newValue(mkTerm("qual"), ad.pos) setInfo qual0.tpe
+              qual = REF(sym)
 
-              typedPos {
-                val sym = currentOwner.newValue(mkTerm("qual"), ad.pos) setInfo qual0.tpe
-                qual = REF(sym)
-
-                BLOCK(
-                  VAL(sym) === qual0,
-                  callAsReflective(mparams map (_.tpe), resType)
-                )
-              }
+              BLOCK(
+                VAL(sym) === qual0,
+                callAsReflective(mparams map (_.tpe), resType)
+              )
+            }
           }
 
           /* For testing purposes, the dynamic application's condition
@@ -606,14 +631,16 @@ abstract class CleanUp extends Transform with ast.TreeDSL {
         }
         transformApply
 
-      // This transform replaces Array(Predef.wrapArray(Array(...)), <tag>)
-      // with just Array(...)
-      case Apply(appMeth, List(Apply(wrapRefArrayMeth, List(array)), _))
-      if (wrapRefArrayMeth.symbol == Predef_wrapRefArray &&
-          appMeth.symbol == ArrayModule_overloadedApply.suchThat {
-            _.tpe.resultType.dealias.typeSymbol == ObjectClass
-          }) =>
-        super.transform(array)
+      // Replaces `Array(Predef.wrapArray(ArrayValue(...).$asInstanceOf[...]), <tag>)`
+      // with just `ArrayValue(...).$asInstanceOf[...]`
+      //
+      // See SI-6611; we must *only* do this for literal vararg arrays.
+      case Apply(appMeth, List(Apply(wrapRefArrayMeth, List(arg @ StripCast(ArrayValue(_, _)))), _))
+      if wrapRefArrayMeth.symbol == Predef_wrapRefArray && appMeth.symbol == ArrayModule_genericApply =>
+        super.transform(arg)
+      case Apply(appMeth, List(elem0, Apply(wrapArrayMeth, List(rest @ ArrayValue(elemtpt, _)))))
+      if wrapArrayMeth.symbol == Predef_wrapArray(elemtpt.tpe) && appMeth.symbol == ArrayModule_apply(elemtpt.tpe) =>
+        super.transform(treeCopy.ArrayValue(rest, rest.elemtpt, elem0 :: rest.elems))
 
       // embeddings: transform calls to __while and __doWhile to jumps
       case Apply(fn, List(arg1, arg2)) if opt.virtualize =>
