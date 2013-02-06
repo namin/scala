@@ -85,7 +85,7 @@ trait Infer extends Checkable {
 
     val formals =
       if (nbSubPats == 0 && booleanExtractor && !isUnapplySeq)  Nil
-      else resTp.baseType(OptionClass).typeArgs match {
+      else resTp.normalize/*baseType(OptionClass)*/.typeArgs match {
         case optionTArg :: Nil =>
           if (nbSubPats == 1)
             if (isUnapplySeq) List(seqToRepeatedChecked(optionTArg))
