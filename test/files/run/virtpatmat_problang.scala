@@ -113,11 +113,25 @@ trait ProbMatcherExRoulette extends ProbMatcher with ProbExtractor {
   import RouletteModel._
 
   val roulette = countedCases(Even -> 18, Odd -> 18, Zero -> 1)
+
+  val roulette1 = roulette match {
+    case r => r
+  }
+
   val roulettePayoff = roulette match {
     case Even(_) => 10.0
     case Odd(_) => 0.0
     case Zero(_) => 0.0
   }
+
+  val roulettePayoff1 = roulette match {
+    case r => r match {
+      case Even(_) => 10.0
+      case Odd(_) => 0.0
+      case Zero(_) => 0.0
+    }
+  }
+
   val roulettePayoff2 = roulette match {
     case Even(_) => 10.0
     case _ => 0.0
@@ -158,7 +172,9 @@ trait ProbLangExTraffic extends ProbLang {
 object Test extends App with ProbPrettyPrint with ProbCondEx with ProbMatcherExRoulette with ProbLangExRoulette {
   show(cond1, "cond1")
   show(roulette, "roulette")
+  show(roulette1, "roulette1")
   show(roulettePayoff, "roulettePayoff")
+  show(roulettePayoff1, "roulettePayoff1")
   show(roulettePayoff2, "roulettePayoff2")
   show(roulettePayoff3, "roulettePayoff3")
   show(roulettePayoff4, "roulettePayoff4")
