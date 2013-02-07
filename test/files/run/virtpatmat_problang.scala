@@ -163,10 +163,14 @@ trait ProbLangExRoulette extends ProbLang with ProbMatcherExRoulette {
     case Odd(_) => 0.0
     case Zero(_) => 0.0
   }
+
+  val roulettePayoff7 = roulette match {
+    case Even(_) => 10.0
+  }
 }
 
 trait ProbLangExTraffic extends ProbLang {
-
+  // TODO
 }
 
 object Test extends App with ProbPrettyPrint with ProbCondEx with ProbMatcherExRoulette with ProbLangExRoulette {
@@ -180,4 +184,5 @@ object Test extends App with ProbPrettyPrint with ProbCondEx with ProbMatcherExR
   show(roulettePayoff4, "roulettePayoff4")
   show(roulettePayoff5, "roulettePayoff5")
   show(roulettePayoff6, "roulettePayoff6")
+  show(roulettePayoff7, "roulettePayoff7")
 }
