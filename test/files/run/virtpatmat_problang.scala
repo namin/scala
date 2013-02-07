@@ -18,7 +18,7 @@ trait ProbCore {
       RandVar(dist.filter(_._2 > 0).groupBy(_._1).map{case (x,ps) => (x, ps.map(_._2).sum)}.toList.sortBy{case (x,p) => (-p,x.toString)})
     def normalize: RandVar[A] = {
       val r = flatten.consolidate
-      r.factor(r.weight)
+      r.factor(1.0/r.weight)
     }
     def flatten: RandVar[A] =
       RandVar(dist.flatMap{case (x,p) => x match {
