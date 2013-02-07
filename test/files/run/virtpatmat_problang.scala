@@ -14,9 +14,8 @@ trait ProbCore {
       dist.map(_._2).sum
     def factor(w: Double): RandVar[A] =
       RandVar(dist.map{case (x,p) => (x,p*w)})
-    def consolidate: RandVar[A] = {
+    def consolidate: RandVar[A] =
       RandVar(dist.filter(_._2 > 0).groupBy(_._1).map{case (x,ps) => (x, ps.map(_._2).sum)}.toList.sortBy{case (x,p) => (-p,x.toString)})
-    }
     def normalize: RandVar[A] = {
       val r = flatten.consolidate
       r.factor(r.weight)
@@ -54,10 +53,10 @@ trait ProbCond extends ProbCore with EmbeddedControls {
 
 trait ProbMatcher extends ProbCore with ProbLift {
   object __match {
-    def one[T](x: T): RandVar[_] =
-      if (x.isInstanceOf[RandVar[_]]) x else always(x)
+    def one[T](x: T): RandVar[T] =
+      always(x)
     def zero = never
-    def guard[T](cond: Boolean, result: => T): RandVar[_] =
+    def guard[T](cond: Boolean, result: => T): RandVar[T] =
       if (cond) one(result) else zero
     def runOrElse[T, U](in: T)(matcher: T => RandVar[U]): RandVar[U] =
       matcher(in).flatten
@@ -84,7 +83,13 @@ trait ProbExtractor extends ProbMatcher {
   val False = ValueExtractor[Boolean](false)
 }
 
-trait ProbLang extends ProbCore with ProbCond with ProbMatcher with ProbExtractor
+trait ProbIndicator extends ProbMatcher {
+  object Indicator {
+    def unapply[A](r: RandVar[A]): RandVar[A] = r
+  }
+}
+
+trait ProbLang extends ProbCore with ProbCond with ProbMatcher with ProbExtractor with ProbIndicator
 
 trait ProbPrettyPrint extends ProbCore {
   def pp[A](r: RandVar[A]) = r.dist.map{case (x,p) => x + " : " + p}.mkString("\n")
@@ -119,36 +124,36 @@ trait ProbMatcherExRoulette extends ProbMatcher with ProbExtractor {
   }
 
   val roulettePayoff = roulette match {
-    case Even(_) => 10.0
-    case Odd(_) => 0.0
-    case Zero(_) => 0.0
+    case Even(_) => 10
+    case Odd(_) => 0
+    case Zero(_) => 0
   }
 
   val roulettePayoff1 = roulette match {
     case r => r match {
-      case Even(_) => 10.0
-      case Odd(_) => 0.0
-      case Zero(_) => 0.0
+      case Even(_) => 10
+      case Odd(_) => 0
+      case Zero(_) => 0
     }
   }
 
   val roulettePayoff2 = roulette match {
-    case Even(_) => 10.0
-    case _ => 0.0
+    case Even(_) => 10
+    case _ => 0
   }
   val roulettePayoff3 = roulette match {
-    case Even(_) => 10.0
-    case Odd(_) => 1.0
-    case Zero(_) => 1.0
+    case Even(_) => 10
+    case Odd(_) => 1
+    case Zero(_) => 1
   }
   val roulettePayoff4 = roulette match {
-    case Even(_) => 10.0
-    case _ => 1.0
+    case Even(_) => 10
+    case _ => 1
   }
   val roulettePayoff5 = roulette match {
-    case Even(r) => 10.0
-    case Odd(r) => 5.0
-    case Zero(r) => 0.0
+    case Even(r) => 10
+    case Odd(r) => 5
+    case Zero(r) => 0
   }
 }
 
@@ -157,15 +162,19 @@ trait ProbLangExRoulette extends ProbLang with ProbMatcherExRoulette {
 
   val roulettePayoff6 = roulette match {
     case Even(_) => boolFlip(0.5) match {
-      case True(_) => 10.0
-      case False(_) => 0.0
+      case True(_) => 10
+      case False(_) => 0
     }
-    case Odd(_) => 0.0
-    case Zero(_) => 0.0
+    case Odd(_) => 0
+    case Zero(_) => 0
   }
 
   val roulettePayoff7 = roulette match {
-    case Even(_) => 10.0
+    case Even(_) => 10
+  }
+
+  val roulettePayoff8 = roulettePayoff match {
+    case Indicator(payoff) => payoff-1
   }
 }
 
@@ -185,4 +194,5 @@ object Test extends App with ProbPrettyPrint with ProbCondEx with ProbMatcherExR
   show(roulettePayoff5, "roulettePayoff5")
   show(roulettePayoff6, "roulettePayoff6")
   show(roulettePayoff7, "roulettePayoff7")
+  show(roulettePayoff8, "roulettePayoff8")
 }
