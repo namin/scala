@@ -15,7 +15,7 @@ trait ProbCore {
     def factor(w: Double): RandVar[A] =
       RandVar(dist.map{case (x,p) => (x,p*w)})
     def consolidate: RandVar[A] = {
-      RandVar(dist.filter(_._2 > 0).groupBy(_._1).map{case (x,ps) => (x, ps.map(_._2).sum)}.toList.sortBy(-_._2))
+      RandVar(dist.filter(_._2 > 0).groupBy(_._1).map{case (x,ps) => (x, ps.map(_._2).sum)}.toList.sortBy{case (x,p) => (-p,x.toString)})
     }
     def normalize: RandVar[A] = {
       val r = flatten.consolidate
