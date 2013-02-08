@@ -1526,7 +1526,8 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
     override def selectorType(selector: Tree): Type = {
       // should we use newTyper.silent here? it seems no: propagating the errors is essential for the current tests
       val tped = typer.typed(_match(vpmName.runOrElse) APPLY selector, EXPRmode, functionType(List(functionType(List(WildcardType), WildcardType)), WildcardType))
-      tped.tpe.typeArgs.head.typeArgs.head
+      if (tped.tpe.isErroneous) super.selectorType(selector)
+      else tped.tpe.typeArgs.head.typeArgs.head
     }
 
 
