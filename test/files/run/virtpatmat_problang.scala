@@ -179,11 +179,57 @@ trait ProbLangExRoulette extends ProbLang with ProbMatcherExRoulette {
 }
 
 trait ProbLangExTraffic extends ProbLang {
-  // TODO
+  object TrafficModel {
+    sealed class Light(name: String) extends CaseExtractor(name) { type A = Light }
+    object Red extends Light("Red")
+    object Green extends Light("Green")
+    object Yellow extends Light("Yellow")
+
+    sealed class Action(name: String) extends CaseExtractor(name) { type A = Action }
+    object Stop extends Action("Stop")
+    object Drive extends Action("Drive")
+
+    sealed class CrashResult(name: String) extends CaseExtractor(name) { type A = CrashResult }
+    object Crash extends CrashResult("Crash")
+    object NoCrash extends CrashResult("NoCrash")
+
+    type Driver = RandVar[Light] => RandVar[Action]
+  }
+  import TrafficModel._
+
+  val trafficLight = weightedCases(Red -> 0.5, Yellow -> 0.1, Green -> 0.4)
+  def cautiousDriver(light: RandVar[Light]) = (light match {
+    case Red(_) => always(Stop)
+    case Yellow(_) => weightedCases(Stop -> 0.9, Drive -> 0.1)
+    case Green(_) => always(Drive)
+  }).asInstanceOf[RandVar[Action]]
+  def aggressiveDriver(light: RandVar[Light]) = (light match {
+    case Red(_) => weightedCases(Stop -> 0.9, Drive -> 0.1)
+    case Yellow(_) => weightedCases(Stop -> 0.1, Drive -> 0.9)
+    case Green(_) => always(Drive)
+  }).asInstanceOf[RandVar[Action]]
+  def otherLight(light: RandVar[Light]) = light match {
+    case Red(_) => Green
+    case Yellow(_) => Red
+    case Green(_) => Red
+  }
+  def crash(driver1: Driver, driver2: Driver, light: RandVar[Light]) = light match {
+    case Indicator(l1) => otherLight(l1) match {
+      case Indicator(l2) => (driver1(l1), driver2(l2)) match {
+        case (Indicator(d1), Indicator(d2)) if d1==Drive && d2==Drive =>
+          weightedCases(Crash -> 0.9, NoCrash -> 0.1)
+        case (Indicator(d1), Indicator(d2)) if d1!=Drive || d2!=Drive =>
+          NoCrash
+      }
+    }
+  }
+  val trafficModel = crash(cautiousDriver, aggressiveDriver, trafficLight)
+  val trafficModel2 = crash(aggressiveDriver, aggressiveDriver, trafficLight)
 }
 
-object Test extends App with ProbPrettyPrint with ProbCondEx with ProbMatcherExRoulette with ProbLangExRoulette {
+object Test extends App with ProbPrettyPrint with ProbCondEx with ProbMatcherExRoulette with ProbLangExRoulette with ProbLangExTraffic {
   show(cond1, "cond1")
+
   show(roulette, "roulette")
   show(roulette1, "roulette1")
   show(roulettePayoff, "roulettePayoff")
@@ -195,4 +241,7 @@ object Test extends App with ProbPrettyPrint with ProbCondEx with ProbMatcherExR
   show(roulettePayoff6, "roulettePayoff6")
   show(roulettePayoff7, "roulettePayoff7")
   show(roulettePayoff8, "roulettePayoff8")
+
+  show(trafficModel, "trafficModel")
+  show(trafficModel2, "trafficModel2")
 }

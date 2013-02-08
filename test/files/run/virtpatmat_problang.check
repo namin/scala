@@ -49,3 +49,11 @@ roulettePayoff8
 -1 : 0.5135135135135136
 9 : 0.4864864864864865
 
+trafficModel
+NoCrash : 0.9631000000000001
+Crash : 0.0369
+
+trafficModel2
+NoCrash : 0.9109
+Crash : 0.08910000000000001
+
