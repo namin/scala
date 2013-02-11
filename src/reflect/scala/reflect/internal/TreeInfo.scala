@@ -89,12 +89,15 @@ abstract class TreeInfo {
       tree.symbol.isStable && isExprSafeToInline(qual)
     case TypeApply(fn, _) =>
       isExprSafeToInline(fn)
+    case Apply(Select(free @ Ident(_), nme.apply), _) if free.symbol.name endsWith nme.REIFY_FREE_VALUE_SUFFIX =>
+      // see a detailed explanation of this trick in `GenSymbols.reifyFreeTerm`
+      free.symbol.hasStableFlag && isExprSafeToInline(free)
     case Apply(fn, List()) =>
-      /* Note: After uncurry, field accesses are represented as Apply(getter, Nil),
-       * so an Apply can also be pure.
-       * However, before typing, applications of nullary functional values are also
-       * Apply(function, Nil) trees. To prevent them from being treated as pure,
-       * we check that the callee is a method. */
+      // Note: After uncurry, field accesses are represented as Apply(getter, Nil),
+      // so an Apply can also be pure.
+      // However, before typing, applications of nullary functional values are also
+      // Apply(function, Nil) trees. To prevent them from being treated as pure,
+      // we check that the callee is a method.
       fn.symbol.isMethod && !fn.symbol.isLazy && isExprSafeToInline(fn)
     case Typed(expr, _) =>
       isExprSafeToInline(expr)
@@ -342,9 +345,6 @@ abstract class TreeInfo {
   def preSuperFields(stats: List[Tree]): List[ValDef] =
     stats collect { case vd: ValDef if isEarlyValDef(vd) => vd }
 
-  def hasUntypedPreSuperFields(stats: List[Tree]): Boolean =
-    preSuperFields(stats) exists (_.tpt.isEmpty)
-
   def isEarlyDef(tree: Tree) = tree match {
     case TypeDef(mods, _, _, _) => mods hasFlag PRESUPER
     case ValDef(mods, _, _, _) => mods hasFlag PRESUPER
@@ -431,10 +431,24 @@ abstract class TreeInfo {
     case _                   => false
   }
 
+  /** Is the argument a wildcard star type of the form `_*`?
+   */
+  def isWildcardStarType(tree: Tree): Boolean = tree match {
+    case Ident(tpnme.WILDCARD_STAR) => true
+    case _                          => false
+  }
+
   /** Is this pattern node a catch-all (wildcard or variable) pattern? */
   def isDefaultCase(cdef: CaseDef) = cdef match {
     case CaseDef(pat, EmptyTree, _) => isWildcardArg(pat)
     case _                          => false
+  }
+
+  /** Is this pattern node a synthetic catch-all case, added during PartialFuction synthesis before we know
+    * whether the user provided cases are exhaustive. */
+  def isSyntheticDefaultCase(cdef: CaseDef) = cdef match {
+    case CaseDef(Bind(nme.DEFAULT_CASE, _), EmptyTree, _) => true
+    case _                                                => false
   }
 
   /** Does this CaseDef catch Throwable? */
@@ -509,10 +523,6 @@ abstract class TreeInfo {
   def isSynthCaseSymbol(sym: Symbol) = sym hasAllFlags SYNTH_CASE_FLAGS
   def hasSynthCaseSymbol(t: Tree)    = t.symbol != null && isSynthCaseSymbol(t.symbol)
 
-  def isTraitRef(tree: Tree): Boolean = {
-    val sym = if (tree.tpe != null) tree.tpe.typeSymbol else null
-    ((sym ne null) && sym.initialize.isTrait)
-  }
 
   /** Applications in Scala can have one of the following shapes:
    *

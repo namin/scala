@@ -86,7 +86,11 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
       case n: TypeName => if (isClass) newClassSymbol(n, pos, newFlags) else newNonClassSymbol(n, pos, newFlags)
     }
 
-    def knownDirectSubclasses             = children
+    def knownDirectSubclasses = {
+      if (!isCompilerUniverse && needsInitialize(isFlagRelated = false, mask = 0)) initialize
+      children
+    }
+
     def baseClasses                       = info.baseClasses
     def module                            = sourceModule
     def thisPrefix: Type                  = thisType
@@ -1188,6 +1192,10 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
      *       to generate a type of kind *
      *  for a term symbol, its usual type.
      *  See the tpe/tpeHK overrides in TypeSymbol for more.
+     *
+     *  For type symbols, `tpe` is different than `info`. `tpe` returns a typeRef
+     *  to the type symbol, `info` returns the type information of the type symbol,
+     *  e.g. a ClassInfoType for classes or a TypeBounds for abstract types.
      */
     def tpe: Type = info
     def tpeHK: Type = tpe
@@ -2507,7 +2515,9 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
     }
 
     override def outerSource: Symbol =
-      if (originalName == nme.OUTER) initialize.referenced
+      // SI-6888 Approximate the name to workaround the deficiencies in `nme.originalName`
+      //         in the face of clases named '$'. SI-2806 remains open to address the deeper problem.
+      if (originalName endsWith (nme.OUTER)) initialize.referenced
       else NoSymbol
 
     def setModuleClass(clazz: Symbol): TermSymbol = {
@@ -2901,6 +2911,7 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
     final override def isNonClassType = false
     final override def isAbstractType = false
     final override def isAliasType = false
+    final override def isContravariant = false
 
     override def isAbstractClass           = this hasFlag ABSTRACT
     override def isCaseClass               = this hasFlag CASE

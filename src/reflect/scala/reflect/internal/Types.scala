@@ -586,9 +586,9 @@ trait Types extends api.Types { self: SymbolTable =>
      *  Expands type aliases and converts higher-kinded TypeRefs to PolyTypes.
      *  Functions on types are also implemented as PolyTypes.
      *
-     *  Example: (in the below, <List> is the type constructor of List)
-     *    TypeRef(pre, <List>, List()) is replaced by
-     *    PolyType(X, TypeRef(pre, <List>, List(X)))
+     *  Example: (in the below, `<List>` is the type constructor of List)
+     *    TypeRef(pre, `<List>`, List()) is replaced by
+     *    PolyType(X, TypeRef(pre, `<List>`, List(X)))
      */
     def normalize = this // @MAT
 
@@ -1800,7 +1800,7 @@ trait Types extends api.Types { self: SymbolTable =>
       // TODO see comments around def intersectionType and def merge
       def flatten(tps: List[Type]): List[Type] = tps flatMap { case RefinedType(parents, ds) if ds.isEmpty => flatten(parents) case tp => List(tp) }
       val flattened = flatten(parents).distinct
-      if (decls.isEmpty && flattened.tail.isEmpty) {
+      if (decls.isEmpty && hasLength(flattened, 1)) {
         flattened.head
       } else if (flattened != parents) {
         refinedType(flattened, if (typeSymbol eq NoSymbol) NoSymbol else typeSymbol.owner, decls, NoPosition)
@@ -3542,7 +3542,7 @@ trait Types extends api.Types { self: SymbolTable =>
     if (phase.erasedTypes)
       if (parents.isEmpty) ObjectClass.tpe else parents.head
     else {
-      val clazz = owner.newRefinementClass(pos) // TODO: why were we passing in NoPosition instead of pos?
+      val clazz = owner.newRefinementClass(pos)
       val result = RefinedType(parents, decls, clazz)
       clazz.setInfo(result)
       result
@@ -4698,33 +4698,39 @@ trait Types extends api.Types { self: SymbolTable =>
       }
     }
 
-    override def mapOver(tree: Tree, giveup: ()=>Nothing): Tree = {
-      object trans extends TypeMapTransformer {
+    object mapTreeSymbols extends TypeMapTransformer {
+      val strictCopy = newStrictTreeCopier
 
-        def termMapsTo(sym: Symbol) = from indexOf sym match {
-          case -1   => None
-          case idx  => Some(to(idx))
-        }
-
-        override def transform(tree: Tree) =
-          tree match {
-            case tree@Ident(_) =>
-              termMapsTo(tree.symbol) match {
-                case Some(tosym) =>
-                  if (tosym.info.bounds.hi.typeSymbol isSubClass SingletonClass) {
-                    Ident(tosym.existentialToString)
-                      .setSymbol(tosym)
-                      .setPos(tosym.pos)
-                      .setType(dropSingletonType(tosym.info.bounds.hi))
-                  } else {
-                    giveup()
-                  }
-                case none => super.transform(tree)
-              }
-            case tree => super.transform(tree)
-          }
+      def termMapsTo(sym: Symbol) = from indexOf sym match {
+        case -1   => None
+        case idx  => Some(to(idx))
       }
-      trans.transform(tree)
+
+      // if tree.symbol is mapped to another symbol, passes the new symbol into the
+      // constructor `trans` and sets the symbol and the type on the resulting tree.
+      def transformIfMapped(tree: Tree)(trans: Symbol => Tree) = termMapsTo(tree.symbol) match {
+        case Some(toSym) => trans(toSym) setSymbol toSym setType tree.tpe
+        case None => tree
+      }
+
+      // changes trees which refer to one of the mapped symbols. trees are copied before attributes are modified.
+      override def transform(tree: Tree) = {
+        // super.transform maps symbol references in the types of `tree`. it also copies trees where necessary.
+        super.transform(tree) match {
+          case id @ Ident(_) =>
+            transformIfMapped(id)(toSym =>
+              strictCopy.Ident(id, toSym.name))
+
+          case sel @ Select(qual, name) =>
+            transformIfMapped(sel)(toSym =>
+              strictCopy.Select(sel, qual, toSym.name))
+
+          case tree => tree
+        }
+      }
+    }
+    override def mapOver(tree: Tree, giveup: ()=>Nothing): Tree = {
+      mapTreeSymbols.transform(tree)
     }
   }
 
@@ -4982,6 +4988,51 @@ trait Types extends api.Types { self: SymbolTable =>
         mapOver(tp)
       }
     }
+  }
+
+  /**
+   * A more persistent version of `Type#memberType` which does not require
+   * that the symbol is a direct member of the prefix.
+   *
+   * For instance:
+   *
+   * {{{
+   * class C[T] {
+   *   sealed trait F[A]
+   *   object X {
+   *     object S1 extends F[T]
+   *   }
+   *   class S2 extends F[T]
+   * }
+   * object O extends C[Int] {
+   *   def foo(f: F[Int]) = f match {...} // need to enumerate sealed subtypes of the scrutinee here.
+   * }
+   * class S3 extends O.F[String]
+   *
+   * nestedMemberType(<S1>, <O.type>, <C>) = O.X.S1.type
+   * nestedMemberType(<S2>, <O.type>, <C>) = O.S2.type
+   * nestedMemberType(<S3>, <O.type>, <C>) = S3.type
+   * }}}
+   *
+   * @param sym    The symbol of the subtype
+   * @param pre    The prefix from which the symbol is seen
+   * @param owner
+   */
+  def nestedMemberType(sym: Symbol, pre: Type, owner: Symbol): Type = {
+    def loop(tp: Type): Type =
+      if (tp.isTrivial) tp
+      else if (tp.prefix.typeSymbol isNonBottomSubClass owner) {
+        val widened = tp match {
+          case _: ConstantType => tp        // Java enum constants: don't widen to the enum type!
+          case _               => tp.widen  // C.X.type widens to C.this.X.type, otherwise `tp asSeenFrom (pre, C)` has no effect.
+        }
+        widened asSeenFrom (pre, tp.typeSymbol.owner)
+      }
+      else loop(tp.prefix) memberType tp.typeSymbol
+
+    val result = loop(sym.tpeHK)
+    assert(sym.isTerm || result.typeSymbol == sym, s"($result).typeSymbol = ${result.typeSymbol}; expected ${sym}")
+    result
   }
 
   /** The most deeply nested owner that contains all the symbols
@@ -6075,7 +6126,7 @@ trait Types extends api.Types { self: SymbolTable =>
             (sameLength(params1, params2) &&
              mt1.isImplicit == mt2.isImplicit &&
              matchingParams(params1, params2, mt1.isJava, mt2.isJava) &&
-             isSubType(res1, res2.substSym(params2, params1), depth))
+             isSubType(res1.substSym(params1, params2), res2, depth))
           // TODO: if mt1.params.isEmpty, consider NullaryMethodType?
           case _ =>
             false
@@ -6618,7 +6669,7 @@ trait Types extends api.Types { self: SymbolTable =>
     val ts0 = elimSub0(ts)
     if (ts0.isEmpty || ts0.tail.isEmpty) ts0
     else {
-      val ts1 = ts0 mapConserve (t => elimAnonymousClass(t.underlying))
+      val ts1 = ts0 mapConserve (t => elimAnonymousClass(t.dealiasWiden))
       if (ts1 eq ts0) ts0
       else elimSub(ts1, depth)
     }
@@ -6735,6 +6786,8 @@ trait Types extends api.Types { self: SymbolTable =>
         NullaryMethodType(lub0(matchingRestypes(ts, Nil)))
       case ts @ TypeBounds(_, _) :: rest =>
         TypeBounds(glb(ts map (_.bounds.lo), depth), lub(ts map (_.bounds.hi), depth))
+      case ts @ AnnotatedType(annots, tpe, _) :: rest =>
+        annotationsLub(lub0(ts map (_.withoutAnnotations)), ts)
       case ts =>
         lubResults get (depth, ts) match {
           case Some(lubType) =>
