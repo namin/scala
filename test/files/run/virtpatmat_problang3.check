@@ -1,0 +1,66 @@
+cond1
+1 : 0.5
+3 : 0.5
+
+coinModel1
+0 : 0.5
+3 : 0.5
+
+coinModel2
+0 : 0.5
+2 : 0.5
+
+coffeeModel1
+A and D should grab coffee : 0.5714285714285714
+B and D should grab coffee : 0.2857142857142857
+A and E should grab coffee : 0.14285714285714285
+
+trafficModel
+NoCrash : 0.9631000000000001
+Crash : 0.0369
+
+trafficModel2
+NoCrash : 0.9109
+Crash : 0.08910000000000001
+
+trafficModel3
+NoCrash : 0.9631000000000001
+Crash : 0.0369
+
+trafficModel4
+NoCrash : 0.9109
+Crash : 0.08910000000000001
+
+cond1
+1 : 0.5
+3 : 0.5
+
+coinModel1
+0 : 0.5
+3 : 0.5
+
+coinModel2
+0 : 0.5
+2 : 0.5
+
+coffeeModel1
+A and D should grab coffee : 0.5714285714285714
+B and D should grab coffee : 0.2857142857142857
+A and E should grab coffee : 0.14285714285714285
+
+trafficModel
+NoCrash : 0.9631000000000001
+Crash : 0.03690000000000001
+
+trafficModel2
+NoCrash : 0.9109
+Crash : 0.08910000000000001
+
+trafficModel3
+NoCrash : 0.9631000000000001
+Crash : 0.03690000000000001
+
+trafficModel4
+NoCrash : 0.9109
+Crash : 0.08910000000000001
+
