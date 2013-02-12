@@ -179,6 +179,7 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
       typer.context.unit.warning(pos, "match may not be exhaustive.\nIt would fail on the following "+ ceString)
     }
 
+    def selectorType(selector: Tree): Type = pureType(repeatedToSeq(elimAnonymousClass(selector.tpe.widen.withoutAnnotations)))
     def inMatchMonad(tp: Type): Type
     def pureType(tp: Type): Type
     final def matchMonadResult(tp: Type): Type =
@@ -279,7 +280,7 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
 
       val start = if (Statistics.canEnable) Statistics.startTimer(patmatNanos) else null
 
-      val selectorTp = repeatedToSeq(elimAnonymousClass(selector.tpe.widen.withoutAnnotations))
+      val selectorTp = selectorType(selector)
 
       val origPt  = match_.tpe
       // when one of the internal cps-type-state annotations is present, strip all CPS annotations
@@ -300,7 +301,7 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
       // append the default to the list of cases and suppress the unreachable case error that may arise (once we detect that...)
       val matchFailGenOverride = match_.attachments.get[DefaultOverrideMatchAttachment].map{case DefaultOverrideMatchAttachment(default) => ((scrut: Tree) => default)}
 
-      val selectorSym = freshSym(selector.pos, pureType(selectorTp)) setFlag treeInfo.SYNTH_CASE_FLAGS
+      val selectorSym = freshSym(selector.pos, selectorTp) setFlag treeInfo.SYNTH_CASE_FLAGS
 
       // pt = Any* occurs when compiling test/files/pos/annotDepMethType.scala  with -Xexperimental
       val combined = combineCases(selector, selectorSym, cases map translateCase(selectorSym, pt), pt, matchOwner, matchFailGenOverride)
@@ -1514,12 +1515,21 @@ trait PatternMatching extends Transform with TypingTransformers with ast.TreeDSL
   trait PureMatchMonadInterface extends MatchMonadInterface {
     val matchStrategy: Tree
 
+    // TR: this may be assuming too much about the actual type signatures
     def inMatchMonad(tp: Type): Type = appliedType(oneSig, List(tp)).finalResultType
     def pureType(tp: Type): Type     = appliedType(oneSig, List(tp)).paramTypes.headOption getOrElse NoType // fail gracefully (otherwise we get crashes)
     protected def matchMonadSym      = oneSig.finalResultType.typeSymbol
 
     import CODE._
     def _match(n: Name): SelectStart = matchStrategy DOT n
+
+    override def selectorType(selector: Tree): Type = {
+      // should we use newTyper.silent here? it seems no: propagating the errors is essential for the current tests
+      val tped = typer.typed(_match(vpmName.runOrElse) APPLY selector, EXPRmode, functionType(List(functionType(List(WildcardType), WildcardType)), WildcardType))
+      if (tped.tpe.isErroneous) super.selectorType(selector)
+      else tped.tpe.typeArgs.head.typeArgs.head
+    }
+
 
     private lazy val oneSig: Type =
       typer.typed(_match(vpmName.one), EXPRmode | POLYmode | TAPPmode | FUNmode, WildcardType).tpe  // TODO: error message
