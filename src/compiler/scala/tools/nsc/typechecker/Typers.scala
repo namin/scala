@@ -2442,10 +2442,30 @@ trait Typers extends Modes with Adaptations with Tags {
     def ptOrLub(tps: List[Type], pt: Type  )       = if (isFullyDefined(pt)) (pt, false) else weakLub(tps map (_.deconst))
     def ptOrLubPacked(trees: List[Tree], pt: Type) = if (isFullyDefined(pt)) (pt, false) else weakLub(trees map (c => packedType(c, context.owner).deconst))
 
+    // find the match translator for a given selector. non-null result means we will virtualize
+    def matchTranslator(selector: Tree): patmat.MatchTranslation = {
+      // TODO: add fallback __match sentinel to predef
+      import patmat.{vpmName, PureMatchTranslator, OptimizingMatchTranslator}
+      if (!(newPatternMatching && opt.experimental && context.isNameInScope(vpmName._match))) null    // fast path, avoiding the next line if there's no __match to be seen
+      else newTyper(context.makeImplicit(reportAmbiguousErrors = false)).silent(_.typed(Ident(vpmName._match), EXPRmode, WildcardType), reportAmbiguousErrors = false) match {
+        case SilentResultValue(matchStrategy) => // matchStrategy is our __match object
+          new PureMatchTranslator(this.asInstanceOf[patmat.global.analyzer.Typer] /*TODO*/, matchStrategy)
+        case _                     => null
+      }
+    }
+
     // takes untyped sub-trees of a match and type checks them
-    def typedMatch(selector: Tree, cases: List[CaseDef], mode: Int, pt: Type, tree: Tree = EmptyTree): Match = {
+    def typedMatch(selector: Tree, cases: List[CaseDef], mode: Int, pt: Type, tree: Tree = EmptyTree): Match = 
+      typedMatchWithStrategy(selector, cases, mode, pt, tree)._1
+    def typedMatchWithStrategy(selector: Tree, cases: List[CaseDef], mode: Int, pt: Type, tree: Tree): (Match, patmat.MatchTranslation) = {
       val selector1  = checkDead(typed(selector, EXPRmode | BYVALmode, WildcardType))
-      val selectorTp = packCaptured(selector1.tpe.widen).skolemizeExistential(context.owner, selector)
+      // check whether we will be virtualizing this match or not
+      val matchTrans = matchTranslator(selector)
+
+      val selectorTp = 
+        if (matchTrans ne null) matchTrans.selectorType(selector1)
+        else packCaptured(selector1.tpe.widen).skolemizeExistential(context.owner, selector)
+      
       val casesTyped = typedCases(cases, selectorTp, pt)
 
       val (resTp, needAdapt) =
@@ -2454,25 +2474,18 @@ trait Typers extends Modes with Adaptations with Tags {
 
       val casesAdapted = if (!needAdapt) casesTyped else casesTyped map (adaptCase(_, mode, resTp))
 
-      treeCopy.Match(tree, selector1, casesAdapted) setType resTp
+      (treeCopy.Match(tree, selector1, casesAdapted) setType resTp, matchTrans)
     }
 
     // match has been typed -- virtualize it if we're feeling experimental
     // (virtualized matches are expanded during type checking so they have the full context available)
     // otherwise, do nothing: matches are translated during phase `patmat` (unless -Xoldpatmat)
-    def virtualizedMatch(match_ : Match, mode: Int, pt: Type) = {
-      import patmat.{vpmName, PureMatchTranslator, OptimizingMatchTranslator}
-
-      // TODO: add fallback __match sentinel to predef
-      val matchStrategy: Tree =
-        if (!(newPatternMatching && opt.experimental && context.isNameInScope(vpmName._match))) null    // fast path, avoiding the next line if there's no __match to be seen
-        else newTyper(context.makeImplicit(reportAmbiguousErrors = false)).silent(_.typed(Ident(vpmName._match), EXPRmode, WildcardType), reportAmbiguousErrors = false) match {
-          case SilentResultValue(ms) => ms
-          case _                     => null
-        }
-
-      if (matchStrategy ne null) // virtualize
-        typed((new PureMatchTranslator(this.asInstanceOf[patmat.global.analyzer.Typer] /*TODO*/, matchStrategy)).translateMatch(match_), mode, pt)
+    def virtualizedMatch(match_ : Match, mode: Int, pt: Type) =
+      virtualizedMatchWithStrategy((match_, matchTranslator(match_.selector)), mode, pt)
+    def virtualizedMatchWithStrategy(matchAndStrategy: (Match, patmat.MatchTranslation), mode: Int, pt: Type) = {
+      val (match_, matchTrans) = matchAndStrategy
+      if (matchTrans ne null) // virtualize
+        typed(matchTrans.translateMatch(match_), mode, pt)
       else
         match_ // will be translated in phase `patmat`
     }
@@ -4366,7 +4379,7 @@ trait Typers extends Modes with Adaptations with Tags {
             typed1(atPos(tree.pos) { Function(params, body) }, mode, pt)
           }
         } else
-          virtualizedMatch(typedMatch(selector, cases, mode, pt, tree), mode, pt)
+          virtualizedMatchWithStrategy(typedMatchWithStrategy(selector, cases, mode, pt, tree), mode, pt)
       }
 
       def typedReturn(tree: Return) = {
