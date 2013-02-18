@@ -15,14 +15,13 @@ trait Spec {
   implicit def proxyMaybe[A](m: M[A]): Maybe[A]
   implicit def unit[T](e: T): Exp[T]
 
-  abstract class NilX {
-    def unapply(x: Exp[_]): M[Unit]
+  def __unapply[T](kind: String, x: Exp[_]): M[T]
+  object XNil {
+    def unapply(x: Exp[_]): M[Unit] = __unapply("Nil", x)
   }
-  val XNil: NilX
-  abstract class ConsX {
-    def unapply(x: Exp[_]): M[(Any, Any)]
+  object XCons {
+    def unapply(x: Exp[_]): M[(Any, Any)] = __unapply("Cons", x)
   }
-  val XCons: ConsX
 
   def infix__1[A, B](t: Exp[(A, B)]): Exp[A]
   def infix__2[A, B](t: Exp[(A, B)]): Exp[B]
@@ -96,12 +95,7 @@ trait ImplMatcher extends Spec {
   }
   implicit def unit[T](e: T): Exp[T] = Const(e)
 
-  val XNil = new NilX {
-    def unapply(x: Exp[_]): M[Unit] = TUnapply("Nil", x)
-  }
-  val XCons = new ConsX {
-    def unapply(x: Exp[_]): M[(Any, Any)] = TUnapply("Cons", x)
-  }
+  def __unapply[T](kind: String, x: Exp[_]): M[T] = TUnapply(kind, x)
 
   def infix__1[A, B](t: Exp[(A, B)]): Exp[A] = TTupleSelect(1, t)
   def infix__2[A, B](t: Exp[(A, B)]): Exp[B] = TTupleSelect(2, t)
