@@ -158,39 +158,44 @@ trait ProbRuleLang extends ProbLang {
     def unapply(x: A): Rand[B] = f(x)
   }
 
+  implicit class SRule(f: String => Rand[String]) {
+    def unapply(x: String): Rand[String] = f(x)
+  }
+
+
   def rule[A,B](f: A => Rand[B]) = new Rule[A,B](f)
 
   def infix_rule[A, B](f: A => Rand[B]): Rule[A,B] = new Rule(f)
 
-  lazy val && = ((x: Any) => x match {
+  val && = ((x: Any) => x match {
     case x => (x,x)
   }) rule
 
-  lazy val Likes = ((x: String) => x match {
+  val Likes: SRule = { x: String => x match {
     case "A" => "Coffee"
     case "B" => "Coffee"
     case "D" => "Coffee"
     case "D" => "Coffee" // likes coffee very much!
     case "E" => "Coffee"
-  }) rule
+  }}
 
-  lazy val Friend = ((x: String) => x match {
+  val Friend: SRule = { x: String => x match {
     case "A" => "C"
     case "A" => "C" // are really good friends!
     case "C" => "D"
     case "B" => "D"
     case "A" => "E"
-  }) rule
+  }}
 
-  lazy val Knows: Rule[String, String] = { x: String => x match {
+  val Knows: SRule = { x: String => x match {
     case Friend(Knows(y)) => y
     case x => x
   }}
 
-  lazy val ShouldGrabCoffee = ((x: String) => x match {
+  val ShouldGrabCoffee: SRule = { x: String => x match {
     case Likes("Coffee") && Knows(y @ Likes("Coffee")) if x != y =>
       x + " and " + y + " should grab coffee"
-  }) rule
+  }}
 
 
   val coffeeModel1: Rand[String] = uniform("A","B","C","D","E").flatMap({ case ShouldGrabCoffee(y) => always(y) }).flatMap(x=>x)
