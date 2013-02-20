@@ -125,8 +125,9 @@ trait ProbCoreLazy extends ProbIntf {
   def collapse2[A](r: Rand[A], strategy: String, solutions: Int): List[(A,Prob)] = {
     println("searching for min "+solutions+" solutions")
     type R = List[(A,Prob)]
+    var more = true
     def prob[B](path: RandVar[B], p: Prob, env: Map[Int,Any], budget: Int)(next: (B,Prob,Map[Int,Any],Int) => R): R = 
-    if (budget < 0) Nil else path match {
+    if (budget < 0) { more = true; Nil } else path match {
       case RandVarChoice(id,dist) =>
         env.get(id) match {
           case Some(x) =>
@@ -146,10 +147,15 @@ trait ProbCoreLazy extends ProbIntf {
 
     var res: R = Nil
     var depth = 1
-    while (res.length < solutions) {
+    while (res.length < solutions && more) {
+      println("trying depth "+depth)
+      more = false
       res = prob(r,1,Map.empty,depth)((x,p,e,k)=>List(x->p))
       depth += 1
     }
+    // todo: don't throw away all solutions each time, print them as 
+    // they are discovered (solutions=5 will never give an answer if 
+    // there are only 3)
     normalize(consolidate(res))
   }
 
@@ -405,6 +411,16 @@ trait AppendProg extends ProbLang {
     append2(t3c,randomCList())
   }
 
+  def appendModel5 = {
+    // query: X:::f2 == t3:::f2 solve for X
+    randomList().flatMap{ x =>
+      append1(always(x),always(f2)).flatMap {
+        case res if res == t3:::f2 => always((x,f2,res))
+        case _ => never
+      }
+    }
+  }
+
 
 }
 
@@ -432,5 +448,6 @@ object Test extends App {
     show(appendModel2, "appendModel2")
     show(appendModel3, "appendModel3", "", 5)
     //show(appendModel4, "appendModel4", "", 5)
+    show(appendModel5, "appendModel5", "", 1)
   }
 }
