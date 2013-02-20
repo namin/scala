@@ -134,9 +134,9 @@ trait ProbCoreLazy extends ProbIntf {
             assert(dist exists (_._1 == x), x+" not in "+dist+" for "+id)
             next(x.asInstanceOf[B],p,env,budget)
           case None => 
+            val budget1 = if (dist.lengthCompare(1) <= 0) budget else budget-1 // certain choice doesn't count for depth
             dist flatMap { case (x,q) =>
-              //println("down to depth " + (budget-1))
-              next(x, p*q,env + (id -> x), budget-1)
+              next(x, p*q,env + (id -> x), budget1)
             }
         }
       case RandVarFlatMap(x,f) =>
