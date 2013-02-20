@@ -15,6 +15,7 @@ trait ProbIntf {
   def uniform[A](xs: A*): Rand[A] = choice(xs.map((_,1.0)):_*)
   def choice[A](xs: (A,Prob)*): Rand[A]
   def collapse[A](r: Rand[A]): List[(A,Prob)]
+  def collapse2[A](r: Rand[A], strategy: String, solutions: Int): List[(A,Prob)]  
 }
 
 trait ProbCore extends ProbIntf {
@@ -61,6 +62,8 @@ trait ProbCore extends ProbIntf {
     }
     normalize(consolidate(r.dist.map(path => (path.last.v, prob(path))))).asInstanceOf[List[(A,Prob)]]
   }
+
+  def collapse2[A](r: Rand[A], strategy: String, solutions: Int): List[(A,Prob)] = ???
 }
 
 
@@ -118,16 +121,49 @@ trait ProbCoreLazy extends ProbIntf {
     }
     normalize(consolidate(prob(r,1)((x,p,e)=>List(x->p))))
   }
+
+  def collapse2[A](r: Rand[A], strategy: String, solutions: Int): List[(A,Prob)] = {
+    println("searching for min "+solutions+" solutions")
+    type R = List[(A,Prob)]
+    def prob[B](path: RandVar[B], p: Prob, env: Map[Int,Any], budget: Int)(next: (B,Prob,Map[Int,Any],Int) => R): R = 
+    if (budget < 0) Nil else path match {
+      case RandVarChoice(id,dist) =>
+        env.get(id) match {
+          case Some(x) =>
+            assert(dist exists (_._1 == x), x+" not in "+dist+" for "+id)
+            next(x.asInstanceOf[B],p,env,budget)
+          case None => 
+            dist flatMap { case (x,q) =>
+              //println("down to depth " + (budget-1))
+              next(x, p*q,env + (id -> x), budget-1)
+            }
+        }
+      case RandVarFlatMap(x,f) =>
+        prob(x,p,env,budget) { (y,q,e,k) => prob(f(y),q,e,k)(next) }
+      case RandVarOrElse(x,y) =>
+        prob(x,p,env,budget)(next) ++ prob(y,p,env,budget)(next)
+    }
+
+    var res: R = Nil
+    var depth = 1
+    while (res.length < solutions) {
+      res = prob(r,1,Map.empty,depth)((x,p,e,k)=>List(x->p))
+      depth += 1
+    }
+    normalize(consolidate(res))
+  }
+
 }
 
 
 
 
 trait ProbPrettyPrint extends ProbIntf {
-  def pp[A](r: Rand[A]) = collapse(r).map{case (x,p) => x + " : " + p}.mkString("\n")
-  def show[A](r: Rand[A], desc: String = "") = {
+  def pp[A](r: Rand[A], strategy: String, solutions: Int) = 
+    (if (solutions > 0) collapse2(r,strategy,solutions) else collapse(r)).map{case (x,p) => x + " : " + p}.mkString("\n")
+  def show[A](r: Rand[A], desc: String = "", strategy: String = "", solutions: Int = -1) = {
     println(desc)
-    println(pp(r))
+    println(pp(r,strategy,solutions))
     println("")
   }
 }
@@ -300,8 +336,80 @@ trait ProbLangExTraffic extends ProbLang {
 
 }
 
+trait AppendProg extends ProbLang {
 
-trait RunTests extends ProbLang with ProbPrettyPrint with ProbLangExTraffic with ProbRuleLang {
+  def randomList(): Rand[List[Boolean]] = flip(0.5).flatMap {
+    case false => always(Nil)
+    case true  => 
+      val x = flip(0.5)
+      val tail = randomList()
+      x.flatMap(x => tail.map(xs=>x::xs))
+  }
+
+  abstract class CList[+A]
+  case object CNil extends CList[Nothing]
+  case class CCons[+A](hd: A, tl: Rand[CList[A]]) extends CList[A]
+
+  def asCList[A](x: List[A]): Rand[CList[A]] = x match {
+    case Nil => always(CNil)
+    case x::xs => always(CCons(x, asCList(xs)))
+  }
+  def asLists[A](x: Rand[CList[A]]): Rand[List[A]] = x flatMap {
+    case CNil => always(Nil)
+    case CCons(x, xs) => asLists(xs).map(xs=>x::xs)
+  }
+
+  def randomCList(): Rand[CList[Boolean]] = flip(0.5).flatMap {
+    case false => always(CNil)
+    case true  => 
+      val x = flip(0.5)
+      println("rlist cons")
+      val tail = randomCList()
+      x.map(x => CCons(x, tail))
+  }
+
+  def append1[T](x: Rand[List[T]], y: Rand[List[T]]): Rand[List[T]] = x flatMap {
+    case Nil => y
+    case h::tl => append1(always(tl),y).map(xs=>h::xs) // bad: full list as input
+  }
+
+  def append2[T](x: Rand[CList[T]], y: Rand[CList[T]]): Rand[CList[T]] = x flatMap {
+    case CNil => y
+    case CCons(h,t) => always(CCons(h, append2(t,y)))
+  }
+
+  def append3[T](x: Rand[List[T]], y: Rand[List[T]], z: Rand[List[T]]): Rand[List[T]] = {
+    x
+  }
+
+
+  val t3 = List(true, true, true)
+  val f2 = List(false, false)
+
+  val appendModel1 = {
+    append1(always(t3),always(f2))
+  }
+
+  val appendModel2 = {
+    append1(flip(0.5).map(_::Nil),always(f2))
+  }
+
+  def appendModel3 = { // needs lazy strategy
+    append1(always(t3),randomList())
+  }
+
+  val t3c = asCList(t3)
+  val f2c = asCList(f2)
+
+  def appendModel4 = { // weird -- no solutions?
+    append2(t3c,randomCList())
+  }
+
+
+}
+
+
+trait RunTests extends ProbLang with ProbPrettyPrint with ProbLangExTraffic with ProbRuleLang with AppendProg {
   show(cond1, "cond1")
 
   show(coinModel1, "coinModel1")
@@ -318,5 +426,11 @@ trait RunTests extends ProbLang with ProbPrettyPrint with ProbLangExTraffic with
 
 object Test extends App {
   new RunTests with ProbCore {}
-  new RunTests with ProbCoreLazy {}
+  new RunTests with ProbCoreLazy {
+    // append needs lazyness
+    show(appendModel1, "appendModel1")
+    show(appendModel2, "appendModel2")
+    show(appendModel3, "appendModel3", "", 5)
+    //show(appendModel4, "appendModel4", "", 5)
+  }
 }
