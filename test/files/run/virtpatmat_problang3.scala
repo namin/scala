@@ -15,6 +15,7 @@ trait ProbIntf {
   def uniform[A](xs: A*): Rand[A] = choice(xs.map((_,1.0)):_*)
   def choice[A](xs: (A,Prob)*): Rand[A]
   def collapse[A](r: Rand[A]): List[(A,Prob)]
+  def collapse2[A](r: Rand[A], strategy: String, solutions: Int): List[(A,Prob)]  
 }
 
 trait ProbCore extends ProbIntf {
@@ -61,6 +62,8 @@ trait ProbCore extends ProbIntf {
     }
     normalize(consolidate(r.dist.map(path => (path.last.v, prob(path))))).asInstanceOf[List[(A,Prob)]]
   }
+
+  def collapse2[A](r: Rand[A], strategy: String, solutions: Int): List[(A,Prob)] = ???
 }
 
 
@@ -118,16 +121,67 @@ trait ProbCoreLazy extends ProbIntf {
     }
     normalize(consolidate(prob(r,1)((x,p,e)=>List(x->p))))
   }
+
+  def collapse2[A](r: Rand[A], strategy: String, solutions: Int): List[(A,Prob)] = {
+    println("searching for min "+solutions+" solutions")
+    type R = List[(A,Prob)]
+    var more = true
+    type Mem = List[(Int, AnyRef, Any, Any)] // memo table: (id hash, function, arg, res)
+    type Env = Map[Int,Any]
+
+    def prob[B](path: RandVar[B], p: Prob, mem: Mem, env: Env, budget: Int)(next: (B,Prob,Mem,Env,Int) => R): R = 
+    if (budget < 0) { more = true; Nil } else path match {
+      case RandVarChoice(id,dist) =>
+        env.get(id) match {
+          case Some(x) =>
+            assert(dist exists (_._1 == x), x+" not in "+dist+" for "+id)
+            next(x.asInstanceOf[B],p,mem,env,budget)
+          case None => 
+            val budget1 = if (dist.lengthCompare(1) <= 0) budget else budget-1 // certain choice doesn't count for depth
+            dist flatMap { case (x,q) =>
+              next(x, p*q, mem, env + (id -> x), budget1)
+            }
+        }
+      case RandVarFlatMap(x,f) =>
+        prob(x,p,mem,env,budget) { (y,q,m,e,k) => 
+          // we memoize (continuation,value) pairs.
+          // thankfully, closures have identity in Scala.
+          // we could also attach ids to flatMap objects?
+          m.find(el => (el._2 eq f) && (el._3 == y)) match {
+            case Some((id,el,arg,res)) => prob(res.asInstanceOf[RandVar[B]],q,m,e,k)(next)
+            case None => val res = f(y); prob(res,q,(System.identityHashCode(f),f,y,res)::m,e,k)(next) 
+          }
+        }
+      case RandVarOrElse(x,y) =>
+        prob(x,p,mem,env,budget)(next) ++ prob(y,p,mem,env,budget)(next)
+    }
+
+    var res: R = Nil
+    var depth = 1
+    while (res.length < solutions && more) {
+      println("trying depth "+depth)
+      more = false
+      res = prob(r,1,Nil,Map.empty,depth)((x,p,m,e,k)=>List(x->p))
+      depth += 1
+    }
+    //println(ids.sorted.mkString("\n"))
+    // todo: don't throw away all solutions each time, print them as 
+    // they are discovered (solutions=5 will never give an answer if 
+    // there are only 3)
+    normalize(consolidate(res))
+  }
+
 }
 
 
 
 
 trait ProbPrettyPrint extends ProbIntf {
-  def pp[A](r: Rand[A]) = collapse(r).map{case (x,p) => x + " : " + p}.mkString("\n")
-  def show[A](r: Rand[A], desc: String = "") = {
+  def pp[A](r: Rand[A], strategy: String, solutions: Int) = 
+    (if (solutions > 0) collapse2(r,strategy,solutions) else collapse(r)).map{case (x,p) => x + " : " + p}.mkString("\n")
+  def show[A](r: Rand[A], desc: String = "", strategy: String = "", solutions: Int = -1) = {
     println(desc)
-    println(pp(r))
+    println(pp(r,strategy,solutions))
     println("")
   }
 }
@@ -158,39 +212,44 @@ trait ProbRuleLang extends ProbLang {
     def unapply(x: A): Rand[B] = f(x)
   }
 
+  implicit class SRule(f: String => Rand[String]) {
+    def unapply(x: String): Rand[String] = f(x)
+  }
+
+
   def rule[A,B](f: A => Rand[B]) = new Rule[A,B](f)
 
   def infix_rule[A, B](f: A => Rand[B]): Rule[A,B] = new Rule(f)
 
-  lazy val && = ((x: Any) => x match {
+  val && = ((x: Any) => x match {
     case x => (x,x)
   }) rule
 
-  lazy val Likes = ((x: String) => x match {
+  val Likes: SRule = { x: String => x match {
     case "A" => "Coffee"
     case "B" => "Coffee"
     case "D" => "Coffee"
     case "D" => "Coffee" // likes coffee very much!
     case "E" => "Coffee"
-  }) rule
+  }}
 
-  lazy val Friend = ((x: String) => x match {
+  val Friend: SRule = { x: String => x match {
     case "A" => "C"
     case "A" => "C" // are really good friends!
     case "C" => "D"
     case "B" => "D"
     case "A" => "E"
-  }) rule
+  }}
 
-  lazy val Knows: Rule[String, String] = { x: String => x match {
+  val Knows: SRule = { x: String => x match {
     case Friend(Knows(y)) => y
     case x => x
   }}
 
-  lazy val ShouldGrabCoffee = ((x: String) => x match {
+  val ShouldGrabCoffee: SRule = { x: String => x match {
     case Likes("Coffee") && Knows(y @ Likes("Coffee")) if x != y =>
       x + " and " + y + " should grab coffee"
-  }) rule
+  }}
 
 
   val coffeeModel1: Rand[String] = uniform("A","B","C","D","E").flatMap({ case ShouldGrabCoffee(y) => always(y) }).flatMap(x=>x)
@@ -295,8 +354,128 @@ trait ProbLangExTraffic extends ProbLang {
 
 }
 
+trait AppendProg extends ProbLang {
 
-trait RunTests extends ProbLang with ProbPrettyPrint with ProbLangExTraffic with ProbRuleLang {
+  def randomList(): Rand[List[Boolean]] = flip(0.5).flatMap {
+    case false => always(Nil)
+    case true  => 
+      val x = flip(0.5)
+      val tail = randomList()
+      x.flatMap(x => tail.map(xs=>x::xs))
+  }
+
+  def append[T](x: Rand[List[T]], y: Rand[List[T]]): Rand[List[T]] = x flatMap {
+    case Nil => y
+    case h::tl => append(always(tl),y).map(xs=>h::xs) // full list as input, not very efficient?
+  }
+
+  val t3 = List(true, true, true)
+  val f2 = List(false, false)
+
+  val appendModel1 = {
+    append(always(t3),always(f2))
+  }
+
+  val appendModel2 = {
+    append(flip(0.5).map(_::Nil),always(f2))
+  }
+
+  def appendModel3 = { // needs lazy strategy
+    append(always(t3),randomList())
+  }
+
+  def appendModel4 = {
+    // query: X:::f2 == t3:::f2 solve for X
+    randomList().flatMap{ x =>
+      append(always(x),always(f2)).flatMap {
+        case res if res == t3:::f2 => always((x,f2,res))
+        case _ => never
+      }
+    }
+  }
+
+  def appendModel5 = {
+    // query: X:::Y == t3:::f2 solve for X,Y
+    randomList().flatMap{ x =>
+      randomList().flatMap{ y =>
+        append(always(x),always(y)).flatMap {
+          case res if res == t3:::f2 => always((x,y))
+          case _ => never
+    }}}
+  }
+
+
+
+  // now try lists where the tail itself is a random var
+
+  abstract class CList[+A]
+  case object CNil extends CList[Nothing]
+  case class CCons[+A](hd: A, tl: Rand[CList[A]]) extends CList[A]
+
+  def asCList[A](x: List[A]): Rand[CList[A]] = x match {
+    case Nil => always(CNil)
+    case x::xs => always(CCons(x, asCList(xs)))
+  }
+  def asLists[A](x: Rand[CList[A]]): Rand[List[A]] = x flatMap {
+    case CNil => always(Nil)
+    case CCons(x, xs) => asLists(xs).map(xs=>x::xs)
+  }
+
+  def randomCList(): Rand[CList[Boolean]] = flip(0.5).flatMap {
+    case false => always(CNil)
+    case true  => 
+      val x = flip(0.5)
+      val tail = randomCList()
+      x.map(x => CCons(x, tail))
+  }
+
+  def appendC[T](x: Rand[CList[T]], y: Rand[CList[T]]): Rand[CList[T]] = x flatMap {
+    case CNil => y
+    case CCons(h,t) => always(CCons(h, appendC(t,y)))
+  }
+
+  def listSameC[T](x: Rand[CList[T]], y: Rand[CList[T]]): Rand[Boolean] = 
+    x.flatMap { u => y.flatMap { v => (u,v) match {
+      case (CCons(a,x),CCons(b,y)) if a == b => listSameC(x,y)
+      case (CNil,CNil) => always(true)
+      case _ => always(false)
+    }}}
+
+
+  val t3c = asCList(t3)
+  val f2c = asCList(f2)
+
+  def appendModel3b = {
+    asLists(appendC(t3c,randomCList()))
+  }
+
+  def appendModel4b = {
+    // query: X:::f2 == t3:::f2 solve for X
+    val x = randomCList()
+    val t3f2 = t3++f2
+    listSameC(appendC(x,f2c), asCList(t3f2)).flatMap {
+      case true => 
+        // here we rely on memoization: otherwise x.tail would be making new choices all the time,
+        asLists(x).map(x=>(x,f2,t3f2))
+      case _ => never
+    }
+  }
+
+  def appendModel5b = {
+    // query: X:::Y == t3:::f2 solve for X,Y
+    val x = randomCList()
+    val y = randomCList()
+    listSameC(appendC(x,y), asCList(t3++f2)).flatMap {
+      case true => for (a <- asLists(x); b <- asLists(y)) yield (a,b)
+      case _    => never
+    }
+  }
+
+
+}
+
+
+trait RunTests extends ProbLang with ProbPrettyPrint with ProbLangExTraffic with ProbRuleLang with AppendProg {
   show(cond1, "cond1")
 
   show(coinModel1, "coinModel1")
@@ -313,5 +492,16 @@ trait RunTests extends ProbLang with ProbPrettyPrint with ProbLangExTraffic with
 
 object Test extends App {
   new RunTests with ProbCore {}
-  new RunTests with ProbCoreLazy {}
+  new RunTests with ProbCoreLazy {
+    // append needs lazyness
+    show(appendModel1, "appendModel1")
+    show(appendModel2, "appendModel2")
+    show(appendModel3, "appendModel3", "", 5)
+    show(appendModel4, "appendModel4", "", 1)
+    show(appendModel5, "appendModel5", "", 5)
+
+    show(appendModel3b, "appendModel3b", "", 5)
+    show(appendModel4b, "appendModel4b", "", 1)
+    show(appendModel5b, "appendModel5b", "", 5)
+  }
 }
