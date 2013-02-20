@@ -352,6 +352,39 @@ trait AppendProg extends ProbLang {
       x.flatMap(x => tail.map(xs=>x::xs))
   }
 
+  def append[T](x: Rand[List[T]], y: Rand[List[T]]): Rand[List[T]] = x flatMap {
+    case Nil => y
+    case h::tl => append(always(tl),y).map(xs=>h::xs) // full list as input, not very efficient?
+  }
+
+  val t3 = List(true, true, true)
+  val f2 = List(false, false)
+
+  val appendModel1 = {
+    append(always(t3),always(f2))
+  }
+
+  val appendModel2 = {
+    append(flip(0.5).map(_::Nil),always(f2))
+  }
+
+  def appendModel3 = { // needs lazy strategy
+    append(always(t3),randomList())
+  }
+
+  def appendModel4 = {
+    // query: X:::f2 == t3:::f2 solve for X
+    randomList().flatMap{ x =>
+      append(always(x),always(f2)).flatMap {
+        case res if res == t3:::f2 => always((x,f2,res))
+        case _ => never
+      }
+    }
+  }
+
+
+  // now try lists where the tail itself is a random var
+
   abstract class CList[+A]
   case object CNil extends CList[Nothing]
   case class CCons[+A](hd: A, tl: Rand[CList[A]]) extends CList[A]
@@ -369,57 +402,44 @@ trait AppendProg extends ProbLang {
     case false => always(CNil)
     case true  => 
       val x = flip(0.5)
-      println("rlist cons")
       val tail = randomCList()
       x.map(x => CCons(x, tail))
   }
 
-  def append1[T](x: Rand[List[T]], y: Rand[List[T]]): Rand[List[T]] = x flatMap {
-    case Nil => y
-    case h::tl => append1(always(tl),y).map(xs=>h::xs) // bad: full list as input
-  }
-
-  def append2[T](x: Rand[CList[T]], y: Rand[CList[T]]): Rand[CList[T]] = x flatMap {
+  def appendC[T](x: Rand[CList[T]], y: Rand[CList[T]]): Rand[CList[T]] = x flatMap {
     case CNil => y
-    case CCons(h,t) => always(CCons(h, append2(t,y)))
+    case CCons(h,t) => always(CCons(h, appendC(t,y)))
   }
 
-  def append3[T](x: Rand[List[T]], y: Rand[List[T]], z: Rand[List[T]]): Rand[List[T]] = {
-    x
-  }
+  def listSameC[T](x: Rand[CList[T]], y: Rand[CList[T]]): Rand[Boolean] = 
+    x flatMap { x => y flatMap { y =>
+      (x,y) match {
+        case (CNil,CNil) => always(true)
+        case (CCons(a,u),CCons(b,v)) if a == b => listSameC(u,v)
+        case _ => always(false)
+    }}}
 
-
-  val t3 = List(true, true, true)
-  val f2 = List(false, false)
-
-  val appendModel1 = {
-    append1(always(t3),always(f2))
-  }
-
-  val appendModel2 = {
-    append1(flip(0.5).map(_::Nil),always(f2))
-  }
-
-  def appendModel3 = { // needs lazy strategy
-    append1(always(t3),randomList())
-  }
 
   val t3c = asCList(t3)
   val f2c = asCList(f2)
 
-  def appendModel4 = { // weird -- no solutions?
-    append2(t3c,randomCList())
+  def appendModel3b = {
+    asLists(appendC(t3c,randomCList()))
   }
 
-  def appendModel5 = {
+  def appendModel4b = {
     // query: X:::f2 == t3:::f2 solve for X
-    randomList().flatMap{ x =>
-      append1(always(x),always(f2)).flatMap {
-        case res if res == t3:::f2 => always((x,f2,res))
-        case _ => never
-      }
+    val x = randomCList()
+    val t3f2 = t3++f2
+    listSameC(appendC(x,f2c), asCList(t3f2)).flatMap {
+      case true => 
+        // PROBLEM: x.tail is making new choices all the time,
+        // with new choice ids --> need to memoize (see Hansei case)
+        asLists(x).map(x=>(x,f2,t3f2))
+      case _ => never
     }
   }
+
 
 
 }
@@ -447,7 +467,9 @@ object Test extends App {
     show(appendModel1, "appendModel1")
     show(appendModel2, "appendModel2")
     show(appendModel3, "appendModel3", "", 5)
-    //show(appendModel4, "appendModel4", "", 5)
-    show(appendModel5, "appendModel5", "", 1)
+    show(appendModel4, "appendModel4", "", 1)
+
+    show(appendModel3b, "appendModel3b", "", 5)
+    show(appendModel4b, "appendModel4b", "", 1)
   }
 }
