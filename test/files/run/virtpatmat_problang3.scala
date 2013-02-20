@@ -126,23 +126,34 @@ trait ProbCoreLazy extends ProbIntf {
     println("searching for min "+solutions+" solutions")
     type R = List[(A,Prob)]
     var more = true
-    def prob[B](path: RandVar[B], p: Prob, env: Map[Int,Any], budget: Int)(next: (B,Prob,Map[Int,Any],Int) => R): R = 
+    type Mem = List[(Int, AnyRef, Any, Any)] // memo table: (id hash, function, arg, res)
+    type Env = Map[Int,Any]
+
+    def prob[B](path: RandVar[B], p: Prob, mem: Mem, env: Env, budget: Int)(next: (B,Prob,Mem,Env,Int) => R): R = 
     if (budget < 0) { more = true; Nil } else path match {
       case RandVarChoice(id,dist) =>
         env.get(id) match {
           case Some(x) =>
             assert(dist exists (_._1 == x), x+" not in "+dist+" for "+id)
-            next(x.asInstanceOf[B],p,env,budget)
+            next(x.asInstanceOf[B],p,mem,env,budget)
           case None => 
             val budget1 = if (dist.lengthCompare(1) <= 0) budget else budget-1 // certain choice doesn't count for depth
             dist flatMap { case (x,q) =>
-              next(x, p*q,env + (id -> x), budget1)
+              next(x, p*q, mem, env + (id -> x), budget1)
             }
         }
       case RandVarFlatMap(x,f) =>
-        prob(x,p,env,budget) { (y,q,e,k) => prob(f(y),q,e,k)(next) }
+        prob(x,p,mem,env,budget) { (y,q,m,e,k) => 
+          // we memoize (continuation,value) pairs.
+          // thankfully, closures have identity in Scala.
+          // we could also attach ids to flatMap objects?
+          m.find(el => (el._2 eq f) && (el._3 == y)) match {
+            case Some((id,el,arg,res)) => prob(res.asInstanceOf[RandVar[B]],q,m,e,k)(next)
+            case None => val res = f(y); prob(res,q,(System.identityHashCode(f),f,y,res)::m,e,k)(next) 
+          }
+        }
       case RandVarOrElse(x,y) =>
-        prob(x,p,env,budget)(next) ++ prob(y,p,env,budget)(next)
+        prob(x,p,mem,env,budget)(next) ++ prob(y,p,mem,env,budget)(next)
     }
 
     var res: R = Nil
@@ -150,9 +161,10 @@ trait ProbCoreLazy extends ProbIntf {
     while (res.length < solutions && more) {
       println("trying depth "+depth)
       more = false
-      res = prob(r,1,Map.empty,depth)((x,p,e,k)=>List(x->p))
+      res = prob(r,1,Nil,Map.empty,depth)((x,p,m,e,k)=>List(x->p))
       depth += 1
     }
+    //println(ids.sorted.mkString("\n"))
     // todo: don't throw away all solutions each time, print them as 
     // they are discovered (solutions=5 will never give an answer if 
     // there are only 3)
@@ -433,8 +445,7 @@ trait AppendProg extends ProbLang {
     val t3f2 = t3++f2
     listSameC(appendC(x,f2c), asCList(t3f2)).flatMap {
       case true => 
-        // PROBLEM: x.tail is making new choices all the time,
-        // with new choice ids --> need to memoize (see Hansei case)
+        // here we rely on memoization: otherwise x.tail would be making new choices all the time,
         asLists(x).map(x=>(x,f2,t3f2))
       case _ => never
     }
