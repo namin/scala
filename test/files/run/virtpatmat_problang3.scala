@@ -394,6 +394,17 @@ trait AppendProg extends ProbLang {
     }
   }
 
+  def appendModel5 = {
+    // query: X:::Y == t3:::f2 solve for X,Y
+    randomList().flatMap{ x =>
+      randomList().flatMap{ y =>
+        append(always(x),always(y)).flatMap {
+          case res if res == t3:::f2 => always((x,y))
+          case _ => never
+    }}}
+  }
+
+
 
   // now try lists where the tail itself is a random var
 
@@ -424,11 +435,10 @@ trait AppendProg extends ProbLang {
   }
 
   def listSameC[T](x: Rand[CList[T]], y: Rand[CList[T]]): Rand[Boolean] = 
-    x flatMap { x => y flatMap { y =>
-      (x,y) match {
-        case (CNil,CNil) => always(true)
-        case (CCons(a,u),CCons(b,v)) if a == b => listSameC(u,v)
-        case _ => always(false)
+    x.flatMap { u => y.flatMap { v => (u,v) match {
+      case (CCons(a,x),CCons(b,y)) if a == b => listSameC(x,y)
+      case (CNil,CNil) => always(true)
+      case _ => always(false)
     }}}
 
 
@@ -451,6 +461,15 @@ trait AppendProg extends ProbLang {
     }
   }
 
+  def appendModel5b = {
+    // query: X:::Y == t3:::f2 solve for X,Y
+    val x = randomCList()
+    val y = randomCList()
+    listSameC(appendC(x,y), asCList(t3++f2)).flatMap {
+      case true => for (a <- asLists(x); b <- asLists(y)) yield (a,b)
+      case _    => never
+    }
+  }
 
 
 }
@@ -479,8 +498,10 @@ object Test extends App {
     show(appendModel2, "appendModel2")
     show(appendModel3, "appendModel3", "", 5)
     show(appendModel4, "appendModel4", "", 1)
+    show(appendModel5, "appendModel5", "", 5)
 
     show(appendModel3b, "appendModel3b", "", 5)
     show(appendModel4b, "appendModel4b", "", 1)
+    show(appendModel5b, "appendModel5b", "", 5)
   }
 }
