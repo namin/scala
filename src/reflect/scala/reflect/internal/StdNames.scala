@@ -302,6 +302,7 @@ trait StdNames {
     // Compiler internal names
     val ANYname: NameType                  = "<anyname>"
     val CONSTRUCTOR: NameType              = "<init>"
+    val DEFAULT_CASE: NameType             = "defaultCase$"
     val EQEQ_LOCAL_VAR: NameType           = "eqEqTemp$"
     val FAKE_LOCAL_THIS: NameType          = "this$"
     val INITIALIZER: NameType              = CONSTRUCTOR // Is this buying us something?
@@ -611,6 +612,7 @@ trait StdNames {
     val RootPackage: NameType          = "RootPackage"
     val RootClass: NameType            = "RootClass"
     val Select: NameType               = "Select"
+    val SelectFromTypeTree: NameType   = "SelectFromTypeTree"
     val StringContext: NameType        = "StringContext"
     val This: NameType                 = "This"
     val ThisType: NameType             = "ThisType"

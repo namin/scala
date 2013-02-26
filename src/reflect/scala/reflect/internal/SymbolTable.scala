@@ -6,6 +6,7 @@
 package scala.reflect
 package internal
 
+import scala.annotation.elidable
 import scala.collection.{ mutable, immutable }
 import util._
 
@@ -106,6 +107,11 @@ abstract class SymbolTable extends macros.Universe
   object traceSymbols extends {
     val global: SymbolTable.this.type = SymbolTable.this
   } with util.TraceSymbolActivity
+
+  /** Check that the executing thread is the compiler thread. No-op here,
+   *  overridden in interactive.Global. */
+  @elidable(elidable.WARNING)
+  def assertCorrectThread() {}
 
   /** Are we compiling for Java SE? */
   // def forJVM: Boolean
@@ -339,6 +345,27 @@ abstract class SymbolTable extends macros.Universe
   /** Is this symbol table a part of a compiler universe?
    */
   def isCompilerUniverse = false
+
+  /**
+   * Adds the `sm` String interpolator to a [[scala.StringContext]].
+   */
+  implicit val StringContextStripMarginOps: StringContext => StringContextStripMarginOps = util.StringContextStripMarginOps
+
+  def importPrivateWithinFromJavaFlags(sym: Symbol, jflags: Int): Symbol = {
+    import ClassfileConstants._
+    if ((jflags & (JAVA_ACC_PRIVATE | JAVA_ACC_PROTECTED | JAVA_ACC_PUBLIC)) == 0)
+      // See ticket #1687 for an example of when topLevelClass is NoSymbol: it
+      // apparently occurs when processing v45.3 bytecode.
+      if (sym.enclosingTopLevelClass != NoSymbol)
+        sym.privateWithin = sym.enclosingTopLevelClass.owner
+
+    // protected in java means package protected. #3946
+    if ((jflags & JAVA_ACC_PROTECTED) != 0)
+      if (sym.enclosingTopLevelClass != NoSymbol)
+        sym.privateWithin = sym.enclosingTopLevelClass.owner
+
+    sym
+  }
 }
 
 object SymbolTableStats {

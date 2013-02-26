@@ -71,8 +71,8 @@ abstract class Pickler extends SubComponent {
         if (!t.isDef && t.hasSymbol && t.symbol.isTermMacro) {
           unit.error(t.pos, t.symbol.typeParams.length match {
             case 0 => "macro has not been expanded"
-            case 1 => "type parameter not specified"
-            case _ => "type parameters not specified"
+            case 1 => "this type parameter must be specified"
+            case _ => "these type parameters must be specified"
           })
           return
         }
@@ -198,7 +198,7 @@ abstract class Pickler extends SubComponent {
         case RefinedType(parents, decls) =>
           val rclazz = tp.typeSymbol
           for (m <- decls.iterator)
-            if (m.owner != rclazz) assert(false, "bad refinement member "+m+" of "+tp+", owner = "+m.owner)
+            if (m.owner != rclazz) abort("bad refinement member "+m+" of "+tp+", owner = "+m.owner)
           putSymbol(rclazz); putTypes(parents); putSymbols(decls.toList)
         case ClassInfoType(parents, decls, clazz) =>
           putSymbol(clazz); putTypes(parents); putSymbols(decls.toList)

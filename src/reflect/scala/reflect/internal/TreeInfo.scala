@@ -89,12 +89,15 @@ abstract class TreeInfo {
       tree.symbol.isStable && isExprSafeToInline(qual)
     case TypeApply(fn, _) =>
       isExprSafeToInline(fn)
+    case Apply(Select(free @ Ident(_), nme.apply), _) if free.symbol.name endsWith nme.REIFY_FREE_VALUE_SUFFIX =>
+      // see a detailed explanation of this trick in `GenSymbols.reifyFreeTerm`
+      free.symbol.hasStableFlag && isExprSafeToInline(free)
     case Apply(fn, List()) =>
-      /* Note: After uncurry, field accesses are represented as Apply(getter, Nil),
-       * so an Apply can also be pure.
-       * However, before typing, applications of nullary functional values are also
-       * Apply(function, Nil) trees. To prevent them from being treated as pure,
-       * we check that the callee is a method. */
+      // Note: After uncurry, field accesses are represented as Apply(getter, Nil),
+      // so an Apply can also be pure.
+      // However, before typing, applications of nullary functional values are also
+      // Apply(function, Nil) trees. To prevent them from being treated as pure,
+      // we check that the callee is a method.
       fn.symbol.isMethod && !fn.symbol.isLazy && isExprSafeToInline(fn)
     case Typed(expr, _) =>
       isExprSafeToInline(expr)
@@ -159,7 +162,7 @@ abstract class TreeInfo {
    * Also accounts for varargs.
    */
   private def applyMethodParameters(fn: Tree): List[Symbol] = {
-    val depth  = applyDepth(fn)
+    val depth  = dissectApplied(fn).applyDepth
     // There could be applies which go beyond the parameter list(s),
     // being applied to the result of the method call.
     // !!! Note that this still doesn't seem correct, although it should
@@ -195,29 +198,26 @@ abstract class TreeInfo {
     def isGetter  = mayBeVarGetter(sym) && sym.owner.info.member(nme.getterToSetter(sym.name.toTermName)) != NoSymbol
 
     tree match {
-      case Ident(_)         => isVar
-      case Select(_, _)     => isVar || isGetter
-      case _                =>
-        methPart(tree) match {
-          case Select(qual, nme.apply)  => qual.tpe.member(nme.update) != NoSymbol
-          case _                        => false
-        }
+      case Ident(_)                               => isVar
+      case Select(_, _)                           => isVar || isGetter
+      case Applied(Select(qual, nme.apply), _, _) => qual.tpe.member(nme.update) != NoSymbol
+      case _                                      => false
     }
   }
 
   /** Is tree a self constructor call this(...)? I.e. a call to a constructor of the
    *  same object?
    */
-  def isSelfConstrCall(tree: Tree): Boolean = methPart(tree) match {
-    case Ident(nme.CONSTRUCTOR)
-       | Select(This(_), nme.CONSTRUCTOR) => true
+  def isSelfConstrCall(tree: Tree): Boolean = tree match {
+    case Applied(Ident(nme.CONSTRUCTOR), _, _) => true
+    case Applied(Select(This(_), nme.CONSTRUCTOR), _, _) => true
     case _ => false
   }
 
   /** Is tree a super constructor call?
    */
-  def isSuperConstrCall(tree: Tree): Boolean = methPart(tree) match {
-    case Select(Super(_, _), nme.CONSTRUCTOR) => true
+  def isSuperConstrCall(tree: Tree): Boolean = tree match {
+    case Applied(Select(Super(_, _), nme.CONSTRUCTOR), _, _) => true
     case _ => false
   }
 
@@ -237,6 +237,20 @@ abstract class TreeInfo {
       tree
   }
 
+  /** Strips layers of `.asInstanceOf[T]` / `_.$asInstanceOf[T]()` from an expression */
+  def stripCast(tree: Tree): Tree = tree match {
+    case TypeApply(sel @ Select(inner, _), _) if isCastSymbol(sel.symbol) =>
+      stripCast(inner)
+    case Apply(TypeApply(sel @ Select(inner, _), _), Nil) if isCastSymbol(sel.symbol) =>
+      stripCast(inner)
+    case t =>
+      t
+  }
+
+  object StripCast {
+    def unapply(tree: Tree): Some[Tree] = Some(stripCast(tree))
+  }
+
   /** Is tree a self or super constructor call? */
   def isSelfOrSuperConstrCall(tree: Tree) = {
     // stripNamedApply for SI-3584: adaptToImplicitMethod in Typers creates a special context
@@ -250,22 +264,24 @@ abstract class TreeInfo {
    * in the position `for { <tree> <- expr }` based only
    * on information at the `parser` phase? To qualify, there
    * may be no subtree that will be interpreted as a
-   * Stable Identifier Pattern.
+   * Stable Identifier Pattern, nor any type tests, even
+   * on TupleN. See SI-6968.
    *
    * For instance:
    *
    * {{{
-   * foo @ (bar, (baz, quux))
+   * (foo @ (bar @ _)) = 0
    * }}}
    *
-   * is a variable pattern; if the structure matches,
-   * then the remainder is inevitable.
+   * is a not a variable pattern; if only binds names.
    *
    * The following are not variable patterns.
    *
    * {{{
-   *   foo @ (bar, (`baz`, quux)) // back quoted ident, not at top level
-   *   foo @ (bar, Quux)          // UpperCase ident, not at top level
+   *   `bar`
+   *   Bar
+   *   (a, b)
+   *   _: T
    * }}}
    *
    * If the pattern is a simple identifier, it is always
@@ -294,10 +310,6 @@ abstract class TreeInfo {
       tree match {
         case Bind(name, pat)  => isVarPatternDeep0(pat)
         case Ident(name)      => isVarPattern(tree)
-        case Apply(sel, args) =>
-          (    isReferenceToScalaMember(sel, TupleClass(args.size).name.toTermName)
-            && (args forall isVarPatternDeep0)
-            )
         case _                => false
       }
     }
@@ -399,22 +411,6 @@ abstract class TreeInfo {
     case _                                  => false
   }
 
-  /** If this tree represents a type application (after unwrapping
-   *  any applies) the first type argument.  Otherwise, EmptyTree.
-   */
-  def firstTypeArg(tree: Tree): Tree = tree match {
-    case Apply(fn, _)            => firstTypeArg(fn)
-    case TypeApply(_, targ :: _) => targ
-    case _                       => EmptyTree
-  }
-
-  /** If this tree represents a type application the type arguments. Otherwise Nil.
-   */
-  def typeArguments(tree: Tree): List[Tree] = tree match {
-    case TypeApply(_, targs) => targs
-    case _                   => Nil
-  }
-
   /** If this tree has type parameters, those.  Otherwise Nil.
    */
   def typeParameters(tree: Tree): List[TypeDef] = tree match {
@@ -435,10 +431,24 @@ abstract class TreeInfo {
     case _                   => false
   }
 
+  /** Is the argument a wildcard star type of the form `_*`?
+   */
+  def isWildcardStarType(tree: Tree): Boolean = tree match {
+    case Ident(tpnme.WILDCARD_STAR) => true
+    case _                          => false
+  }
+
   /** Is this pattern node a catch-all (wildcard or variable) pattern? */
   def isDefaultCase(cdef: CaseDef) = cdef match {
     case CaseDef(pat, EmptyTree, _) => isWildcardArg(pat)
     case _                          => false
+  }
+
+  /** Is this pattern node a synthetic catch-all case, added during PartialFuction synthesis before we know
+    * whether the user provided cases are exhaustive. */
+  def isSyntheticDefaultCase(cdef: CaseDef) = cdef match {
+    case CaseDef(Bind(nme.DEFAULT_CASE, _), EmptyTree, _) => true
+    case _                                                => false
   }
 
   /** Does this CaseDef catch Throwable? */
@@ -514,30 +524,121 @@ abstract class TreeInfo {
   def hasSynthCaseSymbol(t: Tree)    = t.symbol != null && isSynthCaseSymbol(t.symbol)
 
 
-  /** The method part of an application node
+  /** Applications in Scala can have one of the following shapes:
+   *
+   *    1) naked core: Ident(_) or Select(_, _) or basically anything else
+   *    2) naked core with targs: TypeApply(core, targs) or AppliedTypeTree(core, targs)
+   *    3) apply or several applies wrapping a core: Apply(core, _), or Apply(Apply(core, _), _), etc
+   *
+   *  This class provides different ways to decompose applications and simplifies their analysis.
+   *
+   *  ***Examples***
+   *  (TypeApply in the examples can be replaced with AppliedTypeTree)
+   *
+   *    Ident(foo):
+   *      * callee = Ident(foo)
+   *      * core = Ident(foo)
+   *      * targs = Nil
+   *      * argss = Nil
+   *
+   *    TypeApply(foo, List(targ1, targ2...))
+   *      * callee = TypeApply(foo, List(targ1, targ2...))
+   *      * core = foo
+   *      * targs = List(targ1, targ2...)
+   *      * argss = Nil
+   *
+   *    Apply(foo, List(arg1, arg2...))
+   *      * callee = foo
+   *      * core = foo
+   *      * targs = Nil
+   *      * argss = List(List(arg1, arg2...))
+   *
+   *    Apply(Apply(foo, List(arg21, arg22, ...)), List(arg11, arg12...))
+   *      * callee = foo
+   *      * core = foo
+   *      * targs = Nil
+   *      * argss = List(List(arg11, arg12...), List(arg21, arg22, ...))
+   *
+   *    Apply(Apply(TypeApply(foo, List(targs1, targs2, ...)), List(arg21, arg22, ...)), List(arg11, arg12...))
+   *      * callee = TypeApply(foo, List(targs1, targs2, ...))
+   *      * core = foo
+   *      * targs = Nil
+   *      * argss = List(List(arg11, arg12...), List(arg21, arg22, ...))
    */
-  def methPart(tree: Tree): Tree = tree match {
-    case Apply(fn, _)           => methPart(fn)
-    case TypeApply(fn, _)       => methPart(fn)
-    case AppliedTypeTree(fn, _) => methPart(fn)
-    case _                      => tree
+  class Applied(val tree: Tree) {
+    /** The tree stripped of the possibly nested applications.
+     *  The original tree if it's not an application.
+     */
+    def callee: Tree = {
+      def loop(tree: Tree): Tree = tree match {
+        case Apply(fn, _) => loop(fn)
+        case tree         => tree
+      }
+      loop(tree)
+    }
+
+    /** The `callee` unwrapped from type applications.
+     *  The original `callee` if it's not a type application.
+     */
+    def core: Tree = callee match {
+      case TypeApply(fn, _)       => fn
+      case AppliedTypeTree(fn, _) => fn
+      case tree                   => tree
+    }
+
+    /** The type arguments of the `callee`.
+     *  `Nil` if the `callee` is not a type application.
+     */
+    def targs: List[Tree] = callee match {
+      case TypeApply(_, args)       => args
+      case AppliedTypeTree(_, args) => args
+      case _                        => Nil
+    }
+
+    /** (Possibly multiple lists of) value arguments of an application.
+     *  `Nil` if the `callee` is not an application.
+     */
+    def argss: List[List[Tree]] = {
+      def loop(tree: Tree): List[List[Tree]] = tree match {
+        case Apply(fn, args) => loop(fn) :+ args
+        case _               => Nil
+      }
+      loop(tree)
+    }
+
+    /** The depth of the nested applies: e.g. Apply(Apply(Apply(_, _), _), _)
+     *  has depth 3.  Continues through type applications (without counting them.)
+     */
+    def applyDepth: Int = {
+      def loop(tree: Tree): Int = tree match {
+        case Apply(fn, _)           => 1 + loop(fn)
+        case TypeApply(fn, _)       => loop(fn)
+        case AppliedTypeTree(fn, _) => loop(fn)
+        case _                      => 0
+      }
+      loop(tree)
+    }
   }
 
-  /** The depth of the nested applies: e.g. Apply(Apply(Apply(_, _), _), _)
-   *  has depth 3.  Continues through type applications (without counting them.)
+  /** Returns a wrapper that knows how to destructure and analyze applications.
    */
-  def applyDepth(tree: Tree): Int = tree match {
-    case Apply(fn, _)           => 1 + applyDepth(fn)
-    case TypeApply(fn, _)       => applyDepth(fn)
-    case AppliedTypeTree(fn, _) => applyDepth(fn)
-    case _                      => 0
-  }
-  def firstArgument(tree: Tree): Tree = tree match {
-    case Apply(fn, args) =>
-      val f = firstArgument(fn)
-      if (f == EmptyTree && !args.isEmpty) args.head else f
-    case _ =>
-      EmptyTree
+  def dissectApplied(tree: Tree) = new Applied(tree)
+
+  /** Destructures applications into important subparts described in `Applied` class,
+   *  namely into: core, targs and argss (in the specified order).
+   *
+   *  Trees which are not applications are also accepted. Their callee and core will
+   *  be equal to the input, while targs and argss will be Nil.
+   *
+   *  The provided extractors don't expose all the API of the `Applied` class.
+   *  For advanced use, call `dissectApplied` explicitly and use its methods instead of pattern matching.
+   */
+  object Applied {
+    def unapply(applied: Applied): Option[(Tree, List[Tree], List[List[Tree]])] =
+      Some((applied.core, applied.targs, applied.argss))
+
+    def unapply(tree: Tree): Option[(Tree, List[Tree], List[List[Tree]])] =
+      unapply(dissectApplied(tree))
   }
 
   /** Does list of trees start with a definition of
@@ -634,7 +735,7 @@ abstract class TreeInfo {
     }
 
     def unapply(tree: Tree) = refPart(tree) match {
-      case ref: RefTree => Some((ref.qualifier.symbol, ref.symbol, typeArguments(tree)))
+      case ref: RefTree => Some((ref.qualifier.symbol, ref.symbol, dissectApplied(tree).targs))
       case _            => None
     }
   }

@@ -399,6 +399,9 @@ trait Trees extends api.Trees { self: SymbolTable =>
 
   case class TypeApply(fun: Tree, args: List[Tree])
        extends GenericApply with TypeApplyApi {
+
+    assert(fun.isTerm, fun)
+
     override def symbol: Symbol = fun.symbol
     override def symbol_=(sym: Symbol) { fun.symbol = sym }
   }
@@ -434,7 +437,11 @@ trait Trees extends api.Trees { self: SymbolTable =>
   object This extends ThisExtractor
 
   case class Select(qualifier: Tree, name: Name)
-       extends RefTree with SelectApi
+       extends RefTree with SelectApi {
+
+    // !!! assert disabled due to test case pos/annotDepMethType.scala triggering it.
+    // assert(qualifier.isTerm, qualifier)
+  }
   object Select extends SelectExtractor
 
   case class Ident(name: Name) extends RefTree with IdentContextApi {
@@ -466,7 +473,10 @@ trait Trees extends api.Trees { self: SymbolTable =>
   object SingletonTypeTree extends SingletonTypeTreeExtractor
 
   case class SelectFromTypeTree(qualifier: Tree, name: TypeName)
-       extends RefTree with TypTree with SelectFromTypeTreeApi
+       extends RefTree with TypTree with SelectFromTypeTreeApi {
+
+    assert(qualifier.isType, qualifier)
+  }
   object SelectFromTypeTree extends SelectFromTypeTreeExtractor
 
   case class CompoundTypeTree(templ: Template)
@@ -475,6 +485,9 @@ trait Trees extends api.Trees { self: SymbolTable =>
 
   case class AppliedTypeTree(tpt: Tree, args: List[Tree])
        extends TypTree with AppliedTypeTreeApi {
+
+    assert(tpt.isType, tpt)
+
     override def symbol: Symbol = tpt.symbol
     override def symbol_=(sym: Symbol) { tpt.symbol = sym }
   }
@@ -518,7 +531,11 @@ trait Trees extends api.Trees { self: SymbolTable =>
     override private[scala] def copyAttrs(tree: Tree) = {
       super.copyAttrs(tree)
       tree match {
-        case other: TypeTree => wasEmpty = other.wasEmpty // SI-6648 Critical for correct operation of `resetAttrs`.
+        case other: TypeTree =>
+          // SI-6648 Critical for correct operation of `resetAttrs`.
+          wasEmpty = other.wasEmpty
+          if (other.orig != null)
+            orig = other.orig.duplicate
         case _ =>
       }
       this
@@ -812,7 +829,7 @@ trait Trees extends api.Trees { self: SymbolTable =>
     }
     def Annotated(tree: Tree, annot: Tree, arg: Tree) = tree match {
       case t @ Annotated(annot0, arg0)
-      if (annot0==annot) => t
+      if (annot0==annot && arg0==arg) => t
       case _ => treeCopy.Annotated(tree, annot, arg)
     }
     def SingletonTypeTree(tree: Tree, ref: Tree) = tree match {
@@ -978,6 +995,18 @@ trait Trees extends api.Trees { self: SymbolTable =>
 
   def DefDef(sym: Symbol, mods: Modifiers, rhs: Tree): DefDef =
     DefDef(sym, mods, mapParamss(sym)(ValDef), rhs)
+
+  /** A DefDef with original trees attached to the TypeTree of each parameter */
+  def DefDef(sym: Symbol, mods: Modifiers, originalParamTpts: Symbol => Tree, rhs: Tree): DefDef = {
+    val paramms = mapParamss(sym){ sym =>
+      val vd = ValDef(sym, EmptyTree)
+      (vd.tpt : @unchecked) match {
+        case tt: TypeTree => tt setOriginal (originalParamTpts(sym) setPos sym.pos.focus)
+      }
+      vd
+    }
+    DefDef(sym, mods, paramms, rhs)
+  }
 
   def DefDef(sym: Symbol, rhs: Tree): DefDef =
     DefDef(sym, Modifiers(sym.flags), rhs)
@@ -1321,25 +1350,26 @@ trait Trees extends api.Trees { self: SymbolTable =>
   }
 
   class ChangeOwnerTraverser(val oldowner: Symbol, val newowner: Symbol) extends Traverser {
-    def changeOwner(tree: Tree) = tree match {
-      case Return(expr) =>
-        if (tree.symbol == oldowner) {
-          // SI-5612
-          if (newowner hasTransOwner oldowner)
-            log("NOT changing owner of %s because %s is nested in %s".format(tree, newowner, oldowner))
-          else {
-            log("changing owner of %s: %s => %s".format(tree, oldowner, newowner))
-            tree.symbol = newowner
-          }
-        }
-      case _: DefTree | _: Function =>
-        if (tree.symbol != NoSymbol && tree.symbol.owner == oldowner) {
-          tree.symbol.owner = newowner
-        }
-      case _ =>
+    final def change(sym: Symbol) = {
+      if (sym != NoSymbol && sym.owner == oldowner)
+        sym.owner = newowner
     }
     override def traverse(tree: Tree) {
-      changeOwner(tree)
+      tree match {
+        case _: Return =>
+          if (tree.symbol == oldowner) {
+            // SI-5612
+            if (newowner hasTransOwner oldowner)
+              log("NOT changing owner of %s because %s is nested in %s".format(tree, newowner, oldowner))
+            else {
+              log("changing owner of %s: %s => %s".format(tree, oldowner, newowner))
+              tree.symbol = newowner
+            }
+          }
+        case _: DefTree | _: Function =>
+          change(tree.symbol)
+        case _ =>
+      }
       super.traverse(tree)
     }
   }
@@ -1426,6 +1456,22 @@ trait Trees extends api.Trees { self: SymbolTable =>
       if (tree.hasSymbol) {
         subst(from, to)
         tree match {
+          case _: DefTree =>
+            val newInfo = symSubst(tree.symbol.info)
+            if (!(newInfo =:= tree.symbol.info)) {
+              debuglog(sm"""
+                |TreeSymSubstituter: updated info of symbol ${tree.symbol}
+                |  Old: ${showRaw(tree.symbol.info, printTypes = true, printIds = true)}
+                |  New: ${showRaw(newInfo, printTypes = true, printIds = true)}""")
+              tree.symbol updateInfo newInfo
+            }
+          case _          =>
+            // no special handling is required for Function or Import nodes here.
+            // as they don't have interesting infos attached to their symbols.
+            // Subsitution of the referenced symbol of Return nodes is handled
+            // in .ChangeOwnerTraverser
+        }
+        tree match {
           case Ident(name0) if tree.symbol != NoSymbol =>
             treeCopy.Ident(tree, tree.symbol.name)
           case Select(qual, name0) if tree.symbol != NoSymbol =>
@@ -1471,6 +1517,15 @@ trait Trees extends api.Trees { self: SymbolTable =>
         if (p(t)) result = Some(t)
         super.traverse(t)
       }
+    }
+  }
+
+  trait TreeStackTraverser extends Traverser {
+    import collection.mutable
+    val path: mutable.Stack[Tree] = mutable.Stack()
+    abstract override def traverse(t: Tree) = {
+      path push t
+      try super.traverse(t) finally path.pop()
     }
   }
 

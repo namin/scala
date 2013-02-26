@@ -980,11 +980,8 @@ self =>
 
     /** Assumed (provisionally) to be TermNames. */
     def ident(skipIt: Boolean): Name =
-      if (isIdent) {
-        val name = in.name.encode
-        in.nextToken()
-        name
-      } else {
+      if (isIdent) rawIdent().encode
+      else {
         syntaxErrorOrIncomplete(expectedMsg(IDENTIFIER), skipIt)
         nme.ERROR
       }
@@ -1933,7 +1930,7 @@ self =>
               case _ =>
             }
             val typeAppliedTree = in.token match {
-              case LBRACKET   => atPos(start, in.offset)(TypeApply(convertToTypeId(t), typeArgs()))
+              case LBRACKET   => atPos(start, in.offset)(AppliedTypeTree(convertToTypeId(t), typeArgs()))
               case _          => t
             }
             in.token match {

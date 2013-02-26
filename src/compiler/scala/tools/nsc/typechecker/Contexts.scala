@@ -35,7 +35,7 @@ trait Contexts { self: Analyzer =>
     val completeList     = JavaLangPackage :: ScalaPackage :: PredefModule :: Nil
   }
 
-  private val startContext = {
+  private lazy val startContext = {
     NoContext.make(
     Template(List(), emptyValDef, List()) setSymbol global.NoSymbol setType global.NoType,
     rootMirror.RootClass,
@@ -144,6 +144,7 @@ trait Contexts { self: Analyzer =>
     def typingIndent = "  " * typingIndentLevel
 
     var buffer: Set[AbsTypeError] = _
+    var warningsBuffer: Set[(Position, String)] = _
 
     def enclClassOrMethod: Context =
       if ((owner eq NoSymbol) || (owner.isClass) || (owner.isMethod)) this
@@ -165,6 +166,7 @@ trait Contexts { self: Analyzer =>
 
     def errBuffer = buffer
     def hasErrors = buffer.nonEmpty
+    def hasWarnings = warningsBuffer.nonEmpty
 
     def state: Int = mode
     def restoreState(state0: Int) = mode = state0
@@ -191,6 +193,11 @@ trait Contexts { self: Analyzer =>
     def flushAndReturnBuffer(): Set[AbsTypeError] = {
       val current = buffer.clone()
       buffer.clear()
+      current
+    }
+    def flushAndReturnWarningsBuffer(): Set[(Position, String)] = {
+      val current = warningsBuffer.clone()
+      warningsBuffer.clear()
       current
     }
 
@@ -282,6 +289,7 @@ trait Contexts { self: Analyzer =>
       c.retyping = this.retyping
       c.openImplicits = this.openImplicits
       c.buffer = if (this.buffer == null) LinkedHashSet[AbsTypeError]() else this.buffer // need to initialize
+      c.warningsBuffer = if (this.warningsBuffer == null) LinkedHashSet[(Position, String)]() else this.warningsBuffer
       registerContext(c.asInstanceOf[analyzer.Context])
       debuglog("[context] ++ " + c.unit + " / " + tree.summaryString)
       c
@@ -334,6 +342,16 @@ trait Contexts { self: Analyzer =>
       c
     }
 
+    /**
+     * A context for typing constructor parameter ValDefs, super or self invocation arguments and default getters
+     * of constructors. These expressions need to be type checked in a scope outside the class, cf. spec 5.3.1.
+     *
+     * This method is called by namer / typer where `this` is the context for the constructor DefDef. The
+     * owner of the resulting (new) context is the outer context for the Template, i.e. the context for the
+     * ClassDef. This means that class type parameters will be in scope. The value parameters of the current
+     * constructor are also entered into the new constructor scope. Members of the class however will not be
+     * accessible.
+     */
     def makeConstructorContext = {
       var baseContext = enclClass.outer
       while (baseContext.tree.isInstanceOf[Template])
@@ -353,6 +371,8 @@ trait Contexts { self: Analyzer =>
           enterLocalElems(c.scope.elems)
         }
       }
+      // Enter the scope elements of this (the scope for the constructor DefDef) into the new constructor scope.
+      // Concretely, this will enter the value parameters of constructor.
       enterElems(this)
       argContext
     }
@@ -406,6 +426,7 @@ trait Contexts { self: Analyzer =>
     def warning(pos: Position, msg: String): Unit = warning(pos, msg, false)
     def warning(pos: Position, msg: String, force: Boolean) {
       if (reportErrors || force) unit.warning(pos, msg)
+      else if (bufferErrors) warningsBuffer += ((pos, msg))
     }
 
     def isLocal(): Boolean = tree match {
@@ -510,8 +531,8 @@ trait Contexts { self: Analyzer =>
 /*
         var c = this
         while (c != NoContext && c.owner != owner) {
-          if (c.outer eq null) assert(false, "accessWithin(" + owner + ") " + c);//debug
-          if (c.outer.enclClass eq null) assert(false, "accessWithin(" + owner + ") " + c);//debug
+          if (c.outer eq null) abort("accessWithin(" + owner + ") " + c);//debug
+          if (c.outer.enclClass eq null) abort("accessWithin(" + owner + ") " + c);//debug
           c = c.outer.enclClass
         }
         c != NoContext

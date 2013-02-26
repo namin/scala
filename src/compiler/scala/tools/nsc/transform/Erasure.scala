@@ -340,12 +340,18 @@ abstract class Erasure extends AddInterfaces
       case _                               => tp.deconst
     }
   }
-  // Methods on Any/Object which we rewrite here while we still know what
-  // is a primitive and what arrived boxed.
-  private lazy val interceptedMethods = Set[Symbol](Any_##, Object_##, Any_getClass, AnyVal_getClass) ++ (
-    // Each value class has its own getClass for ultra-precise class object typing.
+  
+  // Each primitive value class has its own getClass for ultra-precise class object typing.
+  private lazy val primitiveGetClassMethods = Set[Symbol](Any_getClass, AnyVal_getClass) ++ (
     ScalaValueClasses map (_.tpe member nme.getClass_)
   )
+  
+  // ## requires a little translation
+  private lazy val poundPoundMethods = Set[Symbol](Any_##, Object_##)
+  
+  // Methods on Any/Object which we rewrite here while we still know what
+  // is a primitive and what arrived boxed.
+  private lazy val interceptedMethods = poundPoundMethods ++ primitiveGetClassMethods
 
 // -------- erasure on trees ------------------------------------------
 
@@ -437,19 +443,19 @@ abstract class Erasure extends AddInterfaces
         noclash = false
         unit.error(
           if (member.owner == root) member.pos else root.pos,
-          s"""bridge generated for member ${fulldef(member)}
-             |which overrides ${fulldef(other)}
-             |clashes with definition of $what;
-             |both have erased type ${afterPostErasure(bridge.tpe)}""".stripMargin)
+          sm"""bridge generated for member ${fulldef(member)}
+              |which overrides ${fulldef(other)}
+              |clashes with definition of $what;
+              |both have erased type ${afterPostErasure(bridge.tpe)}""")
       }
       for (bc <- root.baseClasses) {
         if (settings.debug.value)
           afterPostErasure(println(
-            s"""check bridge overrides in $bc
-            ${bc.info.nonPrivateDecl(bridge.name)}
-            ${site.memberType(bridge)}
-            ${site.memberType(bc.info.nonPrivateDecl(bridge.name) orElse IntClass)}
-            ${(bridge.matchingSymbol(bc, site))}""".stripMargin))
+            sm"""check bridge overrides in $bc
+                |${bc.info.nonPrivateDecl(bridge.name)}
+                |${site.memberType(bridge)}
+                |${site.memberType(bc.info.nonPrivateDecl(bridge.name) orElse IntClass)}
+                |${(bridge.matchingSymbol(bc, site))}"""))
 
         def overriddenBy(sym: Symbol) =
           sym.matchingSymbol(bc, site).alternatives filter (sym => !sym.isBridge)
@@ -693,7 +699,7 @@ abstract class Erasure extends AddInterfaces
         adaptToType(unbox(tree, pt), pt)
       else if (isPrimitiveValueType(tree.tpe) && !isPrimitiveValueType(pt)) {
         adaptToType(box(tree, pt.toString), pt)
-      } else if (tree.tpe.isInstanceOf[MethodType] && tree.tpe.params.isEmpty) {
+      } else if (isMethodTypeWithEmptyParams(tree.tpe)) {
         // [H] this assert fails when trying to typecheck tree !(SomeClass.this.bitmap) for single lazy val
         //assert(tree.symbol.isStable, "adapt "+tree+":"+tree.tpe+" to "+pt)
         adaptToType(Apply(tree, List()) setPos tree.pos setType tree.tpe.resultType, pt)
@@ -783,16 +789,21 @@ abstract class Erasure extends AddInterfaces
             else if (!isPrimitiveValueType(qual1.tpe) && isPrimitiveValueMember(tree.symbol))
               qual1 = unbox(qual1, tree.symbol.owner.tpe)
 
-            if (isPrimitiveValueMember(tree.symbol) && !isPrimitiveValueType(qual1.tpe))
+            def selectFrom(qual: Tree) = treeCopy.Select(tree, qual, name)
+
+            if (isPrimitiveValueMember(tree.symbol) && !isPrimitiveValueType(qual1.tpe)) {
               tree.symbol = NoSymbol
-            else if (qual1.tpe.isInstanceOf[MethodType] && qual1.tpe.params.isEmpty) {
+              selectFrom(qual1)
+            } else if (isMethodTypeWithEmptyParams(qual1.tpe)) {
               assert(qual1.symbol.isStable, qual1.symbol);
-              qual1 = Apply(qual1, List()) setPos qual1.pos setType qual1.tpe.resultType
+              val applied = Apply(qual1, List()) setPos qual1.pos setType qual1.tpe.resultType
+              adaptMember(selectFrom(applied))
             } else if (!(qual1.isInstanceOf[Super] || (qual1.tpe.typeSymbol isSubClass tree.symbol.owner))) {
               assert(tree.symbol.owner != ArrayClass)
-              qual1 = cast(qual1, tree.symbol.owner.tpe)
+              selectFrom(cast(qual1, tree.symbol.owner.tpe))
+            } else {
+              selectFrom(qual1)
             }
-            treeCopy.Select(tree, qual1, name)
           }
         case SelectFromArray(qual, name, erasure) =>
           var qual1 = typedQualifier(qual)
@@ -869,6 +880,11 @@ abstract class Erasure extends AddInterfaces
         case _ =>
           tree1
       }
+    }
+
+    private def isMethodTypeWithEmptyParams(tpe: Type) = tpe match {
+      case MethodType(Nil, _) => true
+      case _                  => false
     }
   }
 
@@ -1041,17 +1057,17 @@ abstract class Erasure extends AddInterfaces
                     Apply(Select(qual, cmpOp), List(gen.mkAttributedQualifier(targ.tpe)))
                   }
                 case RefinedType(parents, decls) if (parents.length >= 2) =>
-                  // Optimization: don't generate isInstanceOf tests if the static type
-                  // conforms, because it always succeeds.  (Or at least it had better.)
-                  // At this writing the pattern matcher generates some instance tests
-                  // involving intersections where at least one parent is statically known true.
-                  // That needs fixing, but filtering the parents here adds an additional
-                  // level of robustness (in addition to the short term fix.)
-                  val parentTests = parents filterNot (qual.tpe <:< _)
+                  gen.evalOnce(qual, currentOwner, unit) { q =>
+                    // Optimization: don't generate isInstanceOf tests if the static type
+                    // conforms, because it always succeeds.  (Or at least it had better.)
+                    // At this writing the pattern matcher generates some instance tests
+                    // involving intersections where at least one parent is statically known true.
+                    // That needs fixing, but filtering the parents here adds an additional
+                    // level of robustness (in addition to the short term fix.)
+                    val parentTests = parents filterNot (qual.tpe <:< _)
 
-                  if (parentTests.isEmpty) Literal(Constant(true))
-                  else gen.evalOnce(qual, currentOwner, unit) { q =>
-                    atPos(tree.pos) {
+                    if (parentTests.isEmpty) Literal(Constant(true))
+                    else atPos(tree.pos) {
                       parentTests map mkIsInstanceOf(q) reduceRight gen.mkAnd
                     }
                   }
@@ -1126,7 +1142,7 @@ abstract class Erasure extends AddInterfaces
                   args)
               }
             } else if (args.isEmpty && interceptedMethods(fn.symbol)) {
-              if (fn.symbol == Any_## || fn.symbol == Object_##) {
+              if (poundPoundMethods.contains(fn.symbol)) {
                 // This is unattractive, but without it we crash here on ().## because after
                 // erasure the ScalaRunTime.hash overload goes from Unit => Int to BoxedUnit => Int.
                 // This must be because some earlier transformation is being skipped on ##, but so
@@ -1142,9 +1158,18 @@ abstract class Erasure extends AddInterfaces
               } else if (isPrimitiveValueClass(qual.tpe.typeSymbol)) {
                 // Rewrite 5.getClass to ScalaRunTime.anyValClass(5)
                 global.typer.typed(gen.mkRuntimeCall(nme.anyValClass, List(qual, typer.resolveClassTag(tree.pos, qual.tpe.widen))))
-              } else if (fn.symbol == AnyVal_getClass) {
+              } else if (primitiveGetClassMethods.contains(fn.symbol)) {
+                // if we got here then we're trying to send a primitive getClass method to either 
+                // a) an Any, in which cage Object_getClass works because Any erases to object. Or
+                //
+                // b) a non-primitive, e.g. because the qualifier's type is a refinement type where one parent
+                //    of the refinement is a primitive and another is AnyRef. In that case
+                //    we get a primitive form of _getClass trying to target a boxed value
+                //    so we need replace that method name with Object_getClass to get correct behavior.
+                //    See SI-5568.
                 tree setSymbol Object_getClass
               } else {
+                debugwarn(s"The symbol '${fn.symbol}' was interecepted but didn't match any cases, that means the intercepted methods set doesn't match the code")
                 tree
               }
             } else qual match {

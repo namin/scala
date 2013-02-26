@@ -32,10 +32,13 @@ trait IndexedSeq[+A] extends Seq[A]
  *  @define Coll `IndexedSeq`
  */
 object IndexedSeq extends SeqFactory[IndexedSeq] {
+  override lazy val ReusableCBF  = 
+      scala.collection.IndexedSeq.ReusableCBF.asInstanceOf[GenericCanBuildFrom[Nothing]]
   class Impl[A](buf: ArrayBuffer[A]) extends AbstractSeq[A] with IndexedSeq[A] with Serializable {
     def length = buf.length
     def apply(idx: Int) = buf.apply(idx)
   }
-  implicit def canBuildFrom[A]: CanBuildFrom[Coll, A, IndexedSeq[A]] = ReusableCBF.asInstanceOf[GenericCanBuildFrom[A]]
   def newBuilder[A]: Builder[A, IndexedSeq[A]] = Vector.newBuilder[A]
+  implicit def canBuildFrom[A]: CanBuildFrom[Coll, A, IndexedSeq[A]] =
+    ReusableCBF.asInstanceOf[GenericCanBuildFrom[A]]
 }

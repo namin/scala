@@ -129,11 +129,10 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
     private def ErrorStaticModule(sym: Symbol) = throw new ScalaReflectionException(s"$sym is a static module, use reflectModule on a RuntimeMirror to obtain its ModuleMirror")
     private def ErrorNotMember(sym: Symbol, owner: Symbol) = throw new ScalaReflectionException(s"expected a member of $owner, you provided ${sym.kindString} ${sym.fullName}")
     private def ErrorNotField(sym: Symbol) = throw new ScalaReflectionException(s"expected a field or an accessor method symbol, you provided $sym")
-    private def ErrorNonExistentField(sym: Symbol) = throw new ScalaReflectionException(s"""
-      |Scala field ${sym.name} isn't represented as a Java field, neither it has a Java accessor method
-      |note that private parameters of class constructors don't get mapped onto fields and/or accessors,
-      |unless they are used outside of their declaring constructors.
-    """.trim.stripMargin)
+    private def ErrorNonExistentField(sym: Symbol) = throw new ScalaReflectionException(
+      sm"""Scala field ${sym.name} isn't represented as a Java field, neither it has a Java accessor method
+          |note that private parameters of class constructors don't get mapped onto fields and/or accessors,
+          |unless they are used outside of their declaring constructors.""")
     private def ErrorSetImmutableField(sym: Symbol) = throw new ScalaReflectionException(s"cannot set an immutable field ${sym.name}")
     private def ErrorNotConstructor(sym: Symbol, owner: Symbol) = throw new ScalaReflectionException(s"expected a constructor of $owner, you provided $sym")
     private def ErrorFree(member: Symbol, freeType: Symbol) = throw new ScalaReflectionException(s"cannot reflect ${member.kindString} ${member.name}, because it's a member of a weak type ${freeType.name}")
@@ -417,7 +416,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           case sym if sym.owner.isPrimitiveValueClass => invokePrimitiveMethod
           case sym if sym == Predef_classOf           => fail("Predef.classOf is a compile-time function")
           case sym if sym.isTermMacro                 => fail(s"${symbol.fullName} is a macro, i.e. a compile-time function")
-          case _                                      => assert(false, this)
+          case _                                      => abort(s"unsupported symbol $symbol when invoking $this")
         }
       }
     }
@@ -541,8 +540,8 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           val result = anns find (_.annotationType == annotClass)
           if (result.isEmpty && (anns exists (_.annotationType.getName == name)))
             throw new ClassNotFoundException(
-              s"""Mirror classloader mismatch: $jclazz (loaded by ${ReflectionUtils.show(jclazz.getClassLoader)})
-              |is unrelated to the mirror's classloader: (${ReflectionUtils.show(classLoader)})""".stripMargin)
+              sm"""Mirror classloader mismatch: $jclazz (loaded by ${ReflectionUtils.show(jclazz.getClassLoader)})
+                  |is unrelated to the mirror's classloader: (${ReflectionUtils.show(classLoader)})""")
           result
         }
       def loadBytes[T: ClassTag](name: String): Option[T] =
@@ -611,11 +610,19 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
 
     /**
      * Copy all annotations of Java annotated element `jann` over to Scala symbol `sym`.
+     * Also creates `@throws` annotations if necessary.
      *  Pre: `sym` is already initialized with a concrete type.
      *  Note: If `sym` is a method or constructor, its parameter annotations are copied as well.
      */
     private def copyAnnotations(sym: Symbol, jann: AnnotatedElement) {
       sym setAnnotations (jann.getAnnotations map JavaAnnotationProxy).toList
+      // SI-7065: we're not using getGenericExceptionTypes here to be consistent with ClassfileParser
+      val jexTpes = jann match {
+        case jm: jMethod => jm.getExceptionTypes.toList
+        case jconstr: jConstructor[_] => jconstr.getExceptionTypes.toList
+        case _ => Nil
+      }
+      jexTpes foreach (jexTpe => sym.addThrowsAnnotation(classSymbol(jexTpe)))
     }
 
     /**
@@ -632,6 +639,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       /** used to avoid cycles while initializing classes */
       private var parentsLevel = 0
       private var pendingLoadActions: List[() => Unit] = Nil
+      private val relatedSymbols = clazz +: (if (module != NoSymbol) List(module, module.moduleClass) else Nil)
 
       override def load(sym: Symbol): Unit = {
         debugInfo("completing from Java " + sym + "/" + clazz.fullName)//debug
@@ -643,6 +651,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           module.moduleClass setFlag (flags & PRIVATE | JAVA)
         }
 
+        relatedSymbols foreach (importPrivateWithinFromJavaFlags(_, jclazz.getModifiers))
         copyAnnotations(clazz, jclazz)
         // to do: annotations to set also for module?
 
@@ -955,8 +964,8 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
             javaTypeToValueClass(jclazz) orElse lookupClass
 
         assert (cls.isType,
-          s"""${if (cls == NoSymbol) "not a type: symbol" else "no symbol could be"}
-             | loaded from $jclazz in $owner with name $simpleName and classloader $classLoader""".stripMargin)
+          sm"""${if (cls == NoSymbol) "not a type: symbol" else "no symbol could be"}
+              | loaded from $jclazz in $owner with name $simpleName and classloader $classLoader""")
 
         cls.asClass
       }
@@ -1061,6 +1070,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           .newValue(newTermName(jfield.getName), NoPosition, toScalaFieldFlags(jfield.getModifiers))
           .setInfo(typeToScala(jfield.getGenericType))
       fieldCache enter (jfield, field)
+      importPrivateWithinFromJavaFlags(field, jfield.getModifiers)
       copyAnnotations(field, jfield)
       field
     }
@@ -1086,6 +1096,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       val paramtpes = jmeth.getGenericParameterTypes.toList map typeToScala
       val resulttpe = typeToScala(jmeth.getGenericReturnType)
       setMethType(meth, tparams, paramtpes, resulttpe)
+      importPrivateWithinFromJavaFlags(meth, jmeth.getModifiers)
       copyAnnotations(meth, jmeth)
       if ((jmeth.getModifiers & JAVA_ACC_VARARGS) != 0) meth.setInfo(arrayToRepeated(meth.info))
       meth
@@ -1109,6 +1120,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       val paramtpes = jconstr.getGenericParameterTypes.toList map typeToScala
       setMethType(constr, tparams, paramtpes, clazz.tpe)
       constr setInfo GenPolyType(tparams, MethodType(clazz.newSyntheticValueParams(paramtpes), clazz.tpe))
+      importPrivateWithinFromJavaFlags(constr, jconstr.getModifiers)
       copyAnnotations(constr, jconstr)
       constr
     }

@@ -262,7 +262,9 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
   protected def newCompiler(settings: Settings, reporter: Reporter): ReplGlobal = {
     settings.outputDirs setSingleOutput virtualDirectory
     settings.exposeEmptyPackage.value = true
-    new Global(settings, reporter) with ReplGlobal
+    new Global(settings, reporter) with ReplGlobal {
+      override def toString: String = "<global>"
+    }
   }
 
   /** Parent classloader.  Overridable. */
@@ -386,6 +388,7 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
       oldReq <- definedNameMap get name.companionName
       newSym <- req.definedSymbols get name
       oldSym <- oldReq.definedSymbols get name.companionName
+      if Seq(oldSym, newSym).permutations exists { case Seq(s1, s2) => s1.isClass && s2.isModule }
     } {
       afterTyper(replwarn(s"warning: previously defined $oldSym is not a companion to $newSym."))
       replwarn("Companions must be defined together; you may wish to use :paste mode for this.")
@@ -552,7 +555,7 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
 
   // normalize non-public types so we don't see protected aliases like Self
   def normalizeNonPublic(tp: Type) = tp match {
-    case TypeRef(_, sym, _) if sym.isAliasType && !sym.isPublic => tp.normalize
+    case TypeRef(_, sym, _) if sym.isAliasType && !sym.isPublic => tp.dealias
     case _                                                      => tp
   }
 
@@ -972,7 +975,7 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
     // }
     lazy val definedSymbols = (
       termNames.map(x => x -> applyToResultMember(x, x => x)) ++
-      typeNames.map(x => x -> compilerTypeOf(x).typeSymbol)
+      typeNames.map(x => x -> compilerTypeOf(x).typeSymbolDirect)
     ).toMap[Name, Symbol] withDefaultValue NoSymbol
 
     lazy val typesOfDefinedTerms = mapFrom[Name, Name, Type](termNames)(x => applyToResultMember(x, _.tpe))

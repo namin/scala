@@ -625,7 +625,7 @@ self =>
    *
    * @example {{{
    * $naturalsEx
-   * naturalsFrom(1) zip naturalsFrom(2) zip take 5 foreach println
+   * naturalsFrom(1) zip naturalsFrom(2) take 5 foreach println
    * // prints
    * // (1,2)
    * // (2,3)
@@ -841,9 +841,16 @@ self =>
    * // produces: "1, 2, 3, 4, 5, 6"
    * }}}
    */
-  override def distinct: Stream[A] =
-    if (isEmpty) this
-    else cons(head, tail.filter(head != _).distinct)
+  override def distinct: Stream[A] = {
+    // This should use max memory proportional to N, whereas
+    // recursively calling distinct on the tail is N^2.
+    def loop(seen: Set[A], rest: Stream[A]): Stream[A] = {
+      if (rest.isEmpty) rest
+      else if (seen(rest.head)) loop(seen, rest.tail)
+      else cons(rest.head, loop(seen + rest.head, rest.tail))
+    }
+    loop(Set(), this)
+  }
 
   /** Returns a new sequence of given length containing the elements of this
    * sequence followed by zero or more occurrences of given elements.

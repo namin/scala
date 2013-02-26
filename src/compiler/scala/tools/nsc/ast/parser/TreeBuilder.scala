@@ -242,6 +242,13 @@ abstract class TreeBuilder {
     if (tps.tail.isEmpty) tps.head
     else CompoundTypeTree(Template(tps, emptyValDef, Nil))
 
+  /** Create tree representing a while loop */
+  def makeWhile(lname: TermName, cond: Tree, body: Tree): Tree = {
+    val continu = atPos(o2p(body.pos pointOrElse wrappingPos(List(cond, body)).pos.endOrPoint)) { Apply(Ident(lname), Nil) }
+    val rhs = If(cond, Block(List(body), continu), Literal(Constant()))
+    LabelDef(lname, Nil, rhs)
+  }
+
   /** Captures the difference in tree building between virtualized and non-virtualized scala */
   // private commented out since it cause "error: private class TreeBuilderStrategy escapes its defining scope as part of type TreeBuilder.this.TreeBuilderStrategy"
   /*private <-- BUG*/ abstract class TreeBuilderStrategy {

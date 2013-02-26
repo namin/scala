@@ -351,12 +351,13 @@ trait Definitions extends api.StandardDefinitions {
     lazy val PredefModule      = requiredModule[scala.Predef.type]
     lazy val PredefModuleClass = PredefModule.moduleClass
 
-      def Predef_classOf      = getMemberMethod(PredefModule, nme.classOf)
-      def Predef_identity     = getMemberMethod(PredefModule, nme.identity)
-      def Predef_conforms     = getMemberMethod(PredefModule, nme.conforms)
-      def Predef_wrapRefArray = getMemberMethod(PredefModule, nme.wrapRefArray)
-      def Predef_???          = getMemberMethod(PredefModule, nme.???)
-      def Predef_implicitly   = getMemberMethod(PredefModule, nme.implicitly)
+      def Predef_classOf             = getMemberMethod(PredefModule, nme.classOf)
+      def Predef_identity            = getMemberMethod(PredefModule, nme.identity)
+      def Predef_conforms            = getMemberMethod(PredefModule, nme.conforms)
+    def Predef_wrapRefArray        = getMemberMethod(PredefModule, nme.wrapRefArray)
+    def Predef_wrapArray(tp: Type) = getMemberMethod(PredefModule, wrapArrayMethodName(tp))
+    def Predef_???                 = getMemberMethod(PredefModule, nme.???)
+    def Predef_implicitly          = getMemberMethod(PredefModule, nme.implicitly)
 
     /** Is `sym` a member of Predef with the given name?
      *  Note: DON't replace this by sym == Predef_conforms/etc, as Predef_conforms is a `def`
@@ -480,6 +481,8 @@ trait Definitions extends api.StandardDefinitions {
     // arrays and their members
     lazy val ArrayModule                   = requiredModule[scala.Array.type]
       lazy val ArrayModule_overloadedApply = getMemberMethod(ArrayModule, nme.apply)
+           def ArrayModule_genericApply    = ArrayModule_overloadedApply.suchThat(_.paramss.flatten.last.tpe.typeSymbol == ClassTagClass) // [T: ClassTag](xs: T*): Array[T]
+           def ArrayModule_apply(tp: Type) = ArrayModule_overloadedApply.suchThat(_.tpe.resultType =:= arrayType(tp)) // (p1: AnyVal1, ps: AnyVal1*): Array[AnyVal1]
     lazy val ArrayClass                    = getRequiredClass("scala.Array") // requiredClass[scala.Array[_]]
       lazy val Array_apply                 = getMemberMethod(ArrayClass, nme.apply)
       lazy val Array_update                = getMemberMethod(ArrayClass, nme.update)
@@ -554,10 +557,12 @@ trait Definitions extends api.StandardDefinitions {
     lazy val ScalaLongSignatureAnnotation = requiredClass[scala.reflect.ScalaLongSignature]
 
     // Option classes
-    lazy val OptionClass: ClassSymbol = requiredClass[Option[_]]
-    lazy val SomeClass: ClassSymbol   = requiredClass[Some[_]]
-    lazy val NoneModule: ModuleSymbol = requiredModule[scala.None.type]
-    lazy val SomeModule: ModuleSymbol = requiredModule[scala.Some.type]
+    lazy val OptionClass: ClassSymbol   = requiredClass[Option[_]]
+    lazy val OptionModule: ModuleSymbol = requiredModule[scala.Option.type]
+      lazy val Option_apply             = getMemberMethod(OptionModule, nme.apply)
+    lazy val SomeClass: ClassSymbol     = requiredClass[Some[_]]
+    lazy val NoneModule: ModuleSymbol   = requiredModule[scala.None.type]
+    lazy val SomeModule: ModuleSymbol   = requiredModule[scala.Some.type]
 
     def compilerTypeFromTag(tt: ApiUniverse # WeakTypeTag[_]): Type = tt.in(rootMirror).tpe
     def compilerSymbolFromTag(tt: ApiUniverse # WeakTypeTag[_]): Symbol = tt.in(rootMirror).tpe.typeSymbol
@@ -684,6 +689,11 @@ trait Definitions extends api.StandardDefinitions {
       case _        => Nil
     }
 
+    def dropNullaryMethod(tp: Type) = tp match {
+      case NullaryMethodType(restpe) => restpe
+      case _                         => tp
+    }
+
     def unapplyUnwrap(tpe:Type) = tpe.finalResultType.normalize match {
       case RefinedType(p :: _, _) => p.normalize
       case tp                     => tp
@@ -691,9 +701,10 @@ trait Definitions extends api.StandardDefinitions {
 
     def functionApply(n: Int) = getMemberMethod(FunctionClass(n), nme.apply)
 
-    def abstractFunctionForFunctionType(tp: Type) =
-      if (isFunctionType(tp)) abstractFunctionType(tp.typeArgs.init, tp.typeArgs.last)
-      else NoType
+    def abstractFunctionForFunctionType(tp: Type) = {
+      assert(isFunctionType(tp), tp)
+      abstractFunctionType(tp.typeArgs.init, tp.typeArgs.last)
+    }
 
     def isFunctionType(tp: Type): Boolean = tp.normalize match {
       case TypeRef(_, sym, args) if args.nonEmpty =>
@@ -877,6 +888,12 @@ trait Definitions extends api.StandardDefinitions {
         removeRedundantObjects(parents)
     }
 
+    /** Flatten curried parameter lists of a method type. */
+    def allParameters(tpe: Type): List[Symbol] = tpe match {
+      case MethodType(params, res) => params ::: allParameters(res)
+      case _                       => Nil
+    }
+
     def typeStringNoPackage(tp: Type) =
       "" + tp stripPrefix tp.typeSymbol.enclosingPackage.fullName + "."
 
@@ -962,6 +979,7 @@ trait Definitions extends api.StandardDefinitions {
     lazy val BeanPropertyAttr           = requiredClass[scala.beans.BeanProperty]
     lazy val BooleanBeanPropertyAttr    = requiredClass[scala.beans.BooleanBeanProperty]
     lazy val CloneableAttr              = requiredClass[scala.annotation.cloneable]
+    lazy val CompileTimeOnlyAttr        = getClassIfDefined("scala.reflect.internal.annotations.compileTimeOnly")
     lazy val DeprecatedAttr             = requiredClass[scala.deprecated]
     lazy val DeprecatedNameAttr         = requiredClass[scala.deprecatedName]
     lazy val DeprecatedInheritanceAttr  = requiredClass[scala.deprecatedInheritance]

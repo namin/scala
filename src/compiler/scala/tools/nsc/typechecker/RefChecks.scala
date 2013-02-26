@@ -11,6 +11,9 @@ import scala.collection.{ mutable, immutable }
 import transform.InfoTransform
 import scala.collection.mutable.ListBuffer
 import scala.language.postfixOps
+import scala.tools.nsc.settings.ScalaVersion
+import scala.tools.nsc.settings.AnyScalaVersion
+import scala.tools.nsc.settings.NoScalaVersion
 
 /** <p>
  *    Post-attribution checking and transformation.
@@ -60,23 +63,8 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
     super.transformInfo(sym, tp)
   }
 
-  val toJavaRepeatedParam = new TypeMap {
-    def apply(tp: Type) = tp match {
-      case TypeRef(pre, RepeatedParamClass, args) =>
-        typeRef(pre, JavaRepeatedParamClass, args)
-      case _ =>
-        mapOver(tp)
-    }
-  }
-
-  val toScalaRepeatedParam = new TypeMap {
-    def apply(tp: Type): Type = tp match {
-      case TypeRef(pre, JavaRepeatedParamClass, args) =>
-        typeRef(pre, RepeatedParamClass, args)
-      case _ =>
-        mapOver(tp)
-    }
-  }
+  val toJavaRepeatedParam  = new SubstSymMap(RepeatedParamClass -> JavaRepeatedParamClass)
+  val toScalaRepeatedParam = new SubstSymMap(JavaRepeatedParamClass -> RepeatedParamClass)
 
   def accessFlagsToString(sym: Symbol) = flagsToString(
     sym getFlag (PRIVATE | PROTECTED),
@@ -156,27 +144,22 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
 
 // Override checking ------------------------------------------------------------
 
-    def isJavaVarargsAncestor(clazz: Symbol) = (
-         clazz.isClass
-      && clazz.isJavaDefined
-      && (clazz.info.nonPrivateDecls exists isJavaVarArgsMethod)
-    )
-
     /** Add bridges for vararg methods that extend Java vararg methods
      */
     def addVarargBridges(clazz: Symbol): List[Tree] = {
       // This is quite expensive, so attempt to skip it completely.
       // Insist there at least be a java-defined ancestor which
       // defines a varargs method. TODO: Find a cheaper way to exclude.
-      if (clazz.thisType.baseClasses exists isJavaVarargsAncestor) {
+      if (inheritsJavaVarArgsMethod(clazz)) {
         log("Found java varargs ancestor in " + clazz.fullLocationString + ".")
         val self = clazz.thisType
         val bridges = new ListBuffer[Tree]
 
         def varargBridge(member: Symbol, bridgetpe: Type): Tree = {
-          log("Generating varargs bridge for " + member.fullLocationString + " of type " + bridgetpe)
+          log(s"Generating varargs bridge for ${member.fullLocationString} of type $bridgetpe")
 
-          val bridge = member.cloneSymbolImpl(clazz, member.flags | VBRIDGE) setPos clazz.pos
+          val newFlags = (member.flags | VBRIDGE | ARTIFACT) & ~PRIVATE
+          val bridge   = member.cloneSymbolImpl(clazz, newFlags) setPos clazz.pos
           bridge.setInfo(bridgetpe.cloneInfo(bridge))
           clazz.info.decls enter bridge
 
@@ -189,25 +172,34 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           localTyper typed DefDef(bridge, body)
         }
 
-        // For all concrete non-private members that have a (Scala) repeated parameter:
-        //   compute the corresponding method type `jtpe` with a Java repeated parameter
+        // For all concrete non-private members (but: see below) that have a (Scala) repeated
+        //   parameter: compute the corresponding method type `jtpe` with a Java repeated parameter
         //   if a method with type `jtpe` exists and that method is not a varargs bridge
         //   then create a varargs bridge of type `jtpe` that forwards to the
         //   member method with the Scala vararg type.
-        for (member <- clazz.info.nonPrivateMembers) {
+        //
+        // @PP: Can't call nonPrivateMembers because we will miss refinement members,
+        //   which have been marked private. See SI-4729.
+        for (member <- nonTrivialMembers(clazz)) {
+          log(s"Considering $member for java varargs bridge in $clazz")
           if (!member.isDeferred && member.isMethod && hasRepeatedParam(member.info)) {
             val inherited = clazz.info.nonPrivateMemberAdmitting(member.name, VBRIDGE)
+
             // Delaying calling memberType as long as possible
             if (inherited ne NoSymbol) {
-              val jtpe = toJavaRepeatedParam(self.memberType(member))
+              val jtpe = toJavaRepeatedParam(self memberType member)
               // this is a bit tortuous: we look for non-private members or bridges
               // if we find a bridge everything is OK. If we find another member,
               // we need to create a bridge
-              if (inherited filter (sym => (self.memberType(sym) matches jtpe) && !(sym hasFlag VBRIDGE)) exists)
+              val inherited1 = inherited filter (sym => !(sym hasFlag VBRIDGE) && (self memberType sym matches jtpe))
+              if (inherited1.exists)
                 bridges += varargBridge(member, jtpe)
             }
           }
         }
+
+        if (bridges.size > 0)
+          log(s"Adding ${bridges.size} bridges for methods extending java varargs.")
 
         bridges.toList
       }
@@ -905,13 +897,15 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
          *  the type occurs itself at variance position given by `variance`
          */
         def validateVariance(tp: Type, variance: Int): Unit = tp match {
-          case ErrorType => ;
-          case WildcardType => ;
-          case NoType => ;
-          case NoPrefix => ;
-          case ThisType(_) => ;
-          case ConstantType(_) => ;
-          // case DeBruijnIndex(_, _) => ;
+          case ErrorType =>
+          case WildcardType =>
+          case BoundedWildcardType(bounds) =>
+            validateVariance(bounds, variance)
+          case NoType =>
+          case NoPrefix =>
+          case ThisType(_) =>
+          case ConstantType(_) =>
+          // case DeBruijnIndex(_, _) =>
           case SingleType(pre, sym) =>
             validateVariance(pre, variance)
           case TypeRef(pre, sym, args) =>
@@ -1024,15 +1018,18 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
     private def enterSyms(stats: List[Tree]) {
       var index = -1
       for (stat <- stats) {
-        index = index + 1;
+        index = index + 1
+        def enterSym(sym: Symbol) = if (sym.isLocal) {
+          currentLevel.scope.enter(sym)
+          symIndex(sym) = index
+        }
+
         stat match {
+          case DefDef(_, _, _, _, _, _) if stat.symbol.isLazy                 =>
+            enterSym(stat.symbol)
           case ClassDef(_, _, _, _) | DefDef(_, _, _, _, _, _) | ModuleDef(_, _, _) | ValDef(_, _, _, _) =>
             //assert(stat.symbol != NoSymbol, stat);//debug
-            val sym = stat.symbol.lazyAccessorOrSelf
-            if (sym.isLocal) {
-              currentLevel.scope.enter(sym)
-              symIndex(sym) = index;
-            }
+            enterSym(stat.symbol.lazyAccessorOrSelf)
           case _ =>
         }
       }
@@ -1057,6 +1054,12 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
 // Comparison checking -------------------------------------------------------
     object normalizeAll extends TypeMap {
       def apply(tp: Type) = mapOver(tp).normalize
+    }
+
+    def checkImplicitViewOptionApply(pos: Position, fn: Tree, args: List[Tree]): Unit = if (settings.lint.value) (fn, args) match {
+      case (tap@TypeApply(fun, targs), List(view: ApplyImplicitView)) if fun.symbol == Option_apply =>
+        unit.warning(pos, s"Suspicious application of an implicit view (${view.fun}) in the argument to Option.apply.") // SI-6567
+      case _ =>
     }
 
     def checkSensible(pos: Position, fn: Tree, args: List[Tree]) = fn match {
@@ -1261,13 +1264,15 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       val cdef     = ClassDef(mods | MODULE, name.toTypeName, Nil, impl) setSymbol classSym setType NoType
 
       def findOrCreateModuleVar() = localTyper.typedPos(tree.pos) {
-        lazy val createModuleVar = gen.mkModuleVarDef(sym)
-        sym.enclClass.info.decl(nme.moduleVarName(sym.name.toTermName)) match {
-          // In case we are dealing with local symbol then we already have
-          // to correct error with forward reference
-          case NoSymbol => createModuleVar
-          case vsym     => ValDef(vsym)
-        }
+        // See SI-5012, SI-6712.
+        val vsym = (
+          if (sym.owner.isTerm) NoSymbol
+          else sym.enclClass.info.decl(nme.moduleVarName(sym.name.toTermName))
+        )
+        // In case we are dealing with local symbol then we already have
+        // to correct error with forward reference
+        if (vsym == NoSymbol) gen.mkModuleVarDef(sym)
+        else ValDef(vsym)
       }
       def createStaticModuleAccessor() = afterRefchecks {
         val method = (
@@ -1297,34 +1302,6 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       })
     }
 
-    /** Implements lazy value accessors:
-     *    - for lazy values of type Unit and all lazy fields inside traits,
-     *      the rhs is the initializer itself
-     *    - for all other lazy values z the accessor is a block of this form:
-     *      { z = <rhs>; z } where z can be an identifier or a field.
-     */
-    private def makeLazyAccessor(tree: Tree, rhs: Tree): List[Tree] = {
-      val vsym        = tree.symbol
-      assert(vsym.isTerm, vsym)
-      val hasUnitType = vsym.tpe.typeSymbol == UnitClass
-      val lazySym     = vsym.lazyAccessor
-      assert(lazySym != NoSymbol, vsym)
-
-      // for traits, this is further transformed in mixins
-      val body = (
-        if (tree.symbol.owner.isTrait || hasUnitType) rhs
-        else gen.mkAssignAndReturn(vsym, rhs)
-      )
-      val lazyDef = atPos(tree.pos)(DefDef(lazySym, body.changeOwner(vsym -> lazySym)))
-      debuglog("Created lazy accessor: " + lazyDef)
-
-      if (hasUnitType) List(typed(lazyDef))
-      else List(
-        typed(ValDef(vsym)),
-        afterRefchecks(typed(lazyDef))
-      )
-    }
-
     def transformStat(tree: Tree, index: Int): List[Tree] = tree match {
       case t if treeInfo.isSelfConstrCall(t) =>
         assert(index == 0, index)
@@ -1337,8 +1314,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       case ModuleDef(_, _, _) => eliminateModuleDefs(tree)
       case ValDef(_, _, _, _) =>
         val tree1 @ ValDef(_, _, _, rhs) = transform(tree) // important to do before forward reference check
-        if (tree.symbol.isLazy)
-          makeLazyAccessor(tree, rhs)
+        if (tree1.symbol.isLazy) tree1 :: Nil
         else {
           val lazySym = tree.symbol.lazyAccessorOrSelf
           if (lazySym.isLocal && index <= currentLevel.maxindex) {
@@ -1396,10 +1372,28 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
      *  indicating it has changed semantics between versions.
      */
     private def checkMigration(sym: Symbol, pos: Position) = {
-      if (sym.hasMigrationAnnotation)
-        unit.warning(pos, "%s has changed semantics in version %s:\n%s".format(
-          sym.fullLocationString, sym.migrationVersion.get, sym.migrationMessage.get)
-        )
+      if (sym.hasMigrationAnnotation) {
+        val changed = try 
+          settings.Xmigration.value < ScalaVersion(sym.migrationVersion.get)
+        catch {
+          case e : NumberFormatException => 
+            unit.warning(pos, s"${sym.fullLocationString} has an unparsable version number: ${e.getMessage()}")
+            // if we can't parse the format on the migration annotation just conservatively assume it changed         
+            true
+        }
+        if (changed)
+          unit.warning(pos, s"${sym.fullLocationString} has changed semantics in version ${sym.migrationVersion.get}:\n${sym.migrationMessage.get}")
+      }
+    }
+
+    private def checkCompileTimeOnly(sym: Symbol, pos: Position) = {
+      if (sym.isCompileTimeOnly) {
+        def defaultMsg =
+          sm"""Reference to ${sym.fullLocationString} should not have survived past type checking,
+              |it should have been processed and eliminated during expansion of an enclosing macro."""
+        // The getOrElse part should never happen, it's just here as a backstop.
+        unit.error(pos, sym.compileTimeOnlyMessage getOrElse defaultMsg)
+      }
     }
 
     private def lessAccessible(otherSym: Symbol, memberSym: Symbol): Boolean = (
@@ -1481,8 +1475,11 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
     }
     private def isRepeatedParamArg(tree: Tree) = currentApplication match {
       case Apply(fn, args) =>
-        !args.isEmpty && (args.last eq tree) &&
-        fn.tpe.params.length == args.length && isRepeatedParamType(fn.tpe.params.last.tpe)
+        (    args.nonEmpty
+          && (args.last eq tree)
+          && (fn.tpe.params.length == args.length)
+          && isRepeatedParamType(fn.tpe.params.last.tpe)
+        )
       case _ =>
         false
     }
@@ -1550,8 +1547,14 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         sym.name == nme.apply &&
         isClassTypeAccessible(tree)
 
-      if (doTransform)
+      if (doTransform) {
+        tree foreach {
+          case i@Ident(_) =>
+            enterReference(i.pos, i.symbol) // SI-5390 need to `enterReference` for `a` in `a.B()`
+          case _ =>
+        }
         toConstructor(tree.pos, tree.tpe)
+      }
       else {
         ifNot
         tree
@@ -1571,7 +1574,10 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
 
       case Apply(fn, args) =>
         // sensicality should be subsumed by the unreachability/exhaustivity/irrefutability analyses in the pattern matcher
-        if (!inPattern) checkSensible(tree.pos, fn, args)
+        if (!inPattern) {
+          checkImplicitViewOptionApply(tree.pos, fn, args)
+          checkSensible(tree.pos, fn, args)
+        }
         currentApplication = tree
         tree
     }
@@ -1586,8 +1592,9 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
        *  arbitrarily choose one as more important than the other.
        */
       checkDeprecated(sym, tree.pos)
-      if (settings.Xmigration28.value)
+      if(settings.Xmigration.value != NoScalaVersion)
         checkMigration(sym, tree.pos)
+      checkCompileTimeOnly(sym, tree.pos)
 
       if (sym eq NoSymbol) {
         unit.warning(tree.pos, "Select node has NoSymbol! " + tree + " / " + tree.tpe)
@@ -1686,7 +1693,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
             checkAnyValSubclass(currentOwner)
             if (bridges.nonEmpty) deriveTemplate(tree)(_ ::: bridges) else tree
 
-          case dc@TypeTreeWithDeferredRefCheck() => assert(false, "adapt should have turned dc: TypeTreeWithDeferredRefCheck into tpt: TypeTree, with tpt.original == dc"); dc
+          case dc@TypeTreeWithDeferredRefCheck() => abort("adapt should have turned dc: TypeTreeWithDeferredRefCheck into tpt: TypeTree, with tpt.original == dc")
           case tpt@TypeTree() =>
             if(tpt.original != null) {
               tpt.original foreach {

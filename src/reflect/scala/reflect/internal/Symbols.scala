@@ -79,14 +79,18 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
     def isImplementationArtifact: Boolean = (this hasFlag BRIDGE) || (this hasFlag VBRIDGE) || (this hasFlag ARTIFACT)
     def isJava: Boolean = isJavaDefined
     def isVal: Boolean = isTerm && !isModule && !isMethod && !isMutable
-    def isVar: Boolean = isTerm && !isModule && !isMethod && isMutable
+    def isVar: Boolean = isTerm && !isModule && !isMethod && !isLazy && isMutable
 
     def newNestedSymbol(name: Name, pos: Position, newFlags: Long, isClass: Boolean): Symbol = name match {
       case n: TermName => newTermSymbol(n, pos, newFlags)
       case n: TypeName => if (isClass) newClassSymbol(n, pos, newFlags) else newNonClassSymbol(n, pos, newFlags)
     }
 
-    def knownDirectSubclasses             = children
+    def knownDirectSubclasses = {
+      if (!isCompilerUniverse && needsInitialize(isFlagRelated = false, mask = 0)) initialize
+      children
+    }
+
     def baseClasses                       = info.baseClasses
     def module                            = sourceModule
     def thisPrefix: Type                  = thisType
@@ -743,6 +747,9 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
     def elisionLevel        = getAnnotation(ElidableMethodClass) flatMap { _.intArg(0) }
     def implicitNotFoundMsg = getAnnotation(ImplicitNotFoundClass) flatMap { _.stringArg(0) }
 
+    def isCompileTimeOnly       = hasAnnotation(CompileTimeOnlyAttr)
+    def compileTimeOnlyMessage  = getAnnotation(CompileTimeOnlyAttr) flatMap (_ stringArg 0)
+
     /** Is this symbol an accessor method for outer? */
     final def isOuterAccessor = {
       hasFlag(STABLE | ARTIFACT) &&
@@ -1185,6 +1192,10 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
      *       to generate a type of kind *
      *  for a term symbol, its usual type.
      *  See the tpe/tpeHK overrides in TypeSymbol for more.
+     *
+     *  For type symbols, `tpe` is different than `info`. `tpe` returns a typeRef
+     *  to the type symbol, `info` returns the type information of the type symbol,
+     *  e.g. a ClassInfoType for classes or a TypeBounds for abstract types.
      */
     def tpe: Type = info
     def tpeHK: Type = tpe
@@ -1213,6 +1224,7 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
         }
         val current = phase
         try {
+          assertCorrectThread()
           phase = phaseOf(infos.validFrom)
           tp.complete(this)
         } finally {
@@ -1283,6 +1295,7 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
           infos = infos.prev
 
         if (validTo < curPeriod) {
+          assertCorrectThread()
           // adapt any infos that come from previous runs
           val current = phase
           try {
@@ -1578,8 +1591,21 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
       setAnnotations(annot :: annotations)
 
     // Convenience for the overwhelmingly common case
-    def addAnnotation(sym: Symbol, args: Tree*): this.type =
+    def addAnnotation(sym: Symbol, args: Tree*): this.type = {
+      // The assertion below is meant to prevent from issues like SI-7009 but it's disabled
+      // due to problems with cycles while compiling Scala library. It's rather shocking that
+      // just checking if sym is monomorphic type introduces nasty cycles. We are definitively
+      // forcing too much because monomorphism is a local property of a type that can be checked
+      // syntactically
+      // assert(sym.initialize.isMonomorphicType, sym)
       addAnnotation(AnnotationInfo(sym.tpe, args.toList, Nil))
+    }
+
+    /** Use that variant if you want to pass (for example) an applied type */
+    def addAnnotation(tp: Type, args: Tree*): this.type = {
+      assert(tp.typeParams.isEmpty, tp)
+      addAnnotation(AnnotationInfo(tp, args.toList, Nil))
+    }
 
 // ------ comparisons ----------------------------------------------------------------
 
@@ -1645,6 +1671,8 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
     }
 
     @inline final def map(f: Symbol => Symbol): Symbol = if (this eq NoSymbol) this else f(this)
+
+    final def toOption: Option[Symbol] = if (exists) Some(this) else None
 
 // ------ cloneing -------------------------------------------------------------------
 
@@ -1723,8 +1751,27 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
     /** For a case class, the symbols of the accessor methods, one for each
      *  argument in the first parameter list of the primary constructor.
      *  The empty list for all other classes.
+     *
+     * This list will be sorted to correspond to the declaration order
+     * in the constructor parameter
      */
-    final def caseFieldAccessors: List[Symbol] =
+    final def caseFieldAccessors: List[Symbol] = {
+      // We can't rely on the ordering of the case field accessors within decls --
+      // handling of non-public parameters seems to change the order (see SI-7035.)
+      //
+      // Luckily, the constrParamAccessors are still sorted properly, so sort the field-accessors using them
+      // (need to undo name-mangling, including the sneaky trailing whitespace)
+      //
+      // The slightly more principled approach of using the paramss of the
+      // primary constructor leads to cycles in, for example, pos/t5084.scala.
+      val primaryNames = constrParamAccessors.map(acc => nme.dropLocalSuffix(acc.name))
+      caseFieldAccessorsUnsorted.sortBy { acc =>
+        primaryNames indexWhere { orig =>
+          (acc.name == orig) || (acc.name startsWith (orig append "$"))
+        }
+      }
+    }
+    private final def caseFieldAccessorsUnsorted: List[Symbol] =
       (info.decls filter (_.isCaseAccessorMethod)).toList
 
     final def constrParamAccessors: List[Symbol] =
@@ -2468,7 +2515,9 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
     }
 
     override def outerSource: Symbol =
-      if (originalName == nme.OUTER) initialize.referenced
+      // SI-6888 Approximate the name to workaround the deficiencies in `nme.originalName`
+      //         in the face of clases named '$'. SI-2806 remains open to address the deeper problem.
+      if (originalName endsWith (nme.OUTER)) initialize.referenced
       else NoSymbol
 
     def setModuleClass(clazz: Symbol): TermSymbol = {
@@ -2862,6 +2911,7 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
     final override def isNonClassType = false
     final override def isAbstractType = false
     final override def isAliasType = false
+    final override def isContravariant = false
 
     override def isAbstractClass           = this hasFlag ABSTRACT
     override def isCaseClass               = this hasFlag CASE
@@ -3085,7 +3135,7 @@ trait Symbols extends api.Symbols { self: SymbolTable =>
   class RefinementClassSymbol protected[Symbols] (owner0: Symbol, pos0: Position)
   extends ClassSymbol(owner0, pos0, tpnme.REFINE_CLASS_NAME) {
     override def name_=(name: Name) {
-      assert(false, "Cannot set name of RefinementClassSymbol to " + name)
+      abort("Cannot set name of RefinementClassSymbol to " + name)
       super.name_=(name)
     }
     override def isRefinementClass       = true
