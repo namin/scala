@@ -5011,19 +5011,19 @@ trait Typers extends Modes with Adaptations with Tags {
               superPos = body.pos)))
 
             // now we've typed the class definition, we can figure out the apply method's real result type
-            /*val bodyType = scopeClassTree find (_.symbol eq applyMethod) map { case DefDef(mods, name, tparams, vparamss, tpt, rhs) =>
+            val bodyType = scopeClassTree find (_.symbol eq applyMethod) map { case DefDef(mods, name, tparams, vparamss, tpt, rhs) =>
               tpt.tpe = rhs.tpe
               applyMethod.setInfo(NullaryMethodType(rhs.tpe))
               rhs.tpe
             } get
 
-            val bodyFunType = functionType(Nil, bodyType)*/
-            val newTp = intersectionType(List(ifaceTp, implTp/*, bodyFunType*/))
+            val bodyFunType = functionType(Nil, bodyType)
+            val newTp = intersectionType(List(ifaceTp, implTp, bodyFunType))
 
             // mix the scope class with the implementation trait and `() => $bodyFunType`
             val scopeAnonCls = {
               val clazz = context.owner.newClass(body.pos, newTypeName("DSLrun")) setFlag (SYNTHETIC)
-              clazz.setInfo(ClassInfoType(List(scopeClass.tpe, implTp/*, bodyFunType*/), newScope, clazz))
+              clazz.setInfo(ClassInfoType(List(scopeClass.tpe, implTp, bodyFunType), newScope, clazz))
               clazz
             }
 
