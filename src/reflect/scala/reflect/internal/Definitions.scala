@@ -335,6 +335,7 @@ trait Definitions extends api.StandardDefinitions {
       lazy val EmbeddedControls_return = getMember(EmbeddedControlsClass, nme._return)
       lazy val EmbeddedControls_equal = getMember(EmbeddedControlsClass, nme._equal)
     lazy val ProxyControlsClass  = getRequiredClass("scala.ProxyControls")
+    lazy val Symbol_result       = getMemberMethod(SymbolModule, nme.result)
 
     // fundamental modules
     lazy val SysPackage = getPackageObject("scala.sys")

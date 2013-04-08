@@ -5036,7 +5036,7 @@ trait Typers extends Modes with Adaptations with Tags {
                 argss = List(Nil),
                 body = List(),
                 superPos = body.pos),
-              Typed(Apply(Select(New(TypeTree(scopeAnonCls.tpe)), nme.CONSTRUCTOR), Nil), TypeTree(newTp))
+              Select(Typed(Apply(Select(New(TypeTree(scopeAnonCls.tpe)), nme.CONSTRUCTOR), Nil), TypeTree(newTp)), nme.result)
               )))
           } else EmptyTree
         } else EmptyTree

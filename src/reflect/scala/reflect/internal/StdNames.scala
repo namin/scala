@@ -810,6 +810,7 @@ trait StdNames {
     val _return = newTermName("__return")
     val _whileDo = newTermName("__whileDo")
     val _forward = newTermName("__forward")
+    val result: NameType               = "result"
 
     // unencoded operators
     object raw {
