@@ -2,7 +2,7 @@ object Test extends App {
   trait Rep[T]
   def __new[T](args: (String, Boolean, Rep[T] => Rep[_])*): Rep[T] = error("")
 
-  class MyStruct extends Struct[Rep] // Predef.Struct
+  class MyStruct extends Struct // Predef.Struct
   class ApplyDynamicOps {
     def selectDynamic[T](n: String): Rep[T] = error(n)
   }

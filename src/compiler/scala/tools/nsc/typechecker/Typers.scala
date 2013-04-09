@@ -3365,13 +3365,16 @@ trait Typers extends Modes with Adaptations with Tags {
                 // val foo = "foo"; def precise(x: String)(y: x.type): x.type = {...}; val bar : foo.type = precise(foo)(foo)
                 // precise(foo) : foo.type => foo.type
                 val restpe = mt.resultType(args1 map (arg => gen.stableTypeFor(arg) getOrElse arg.tpe))
-                def transformResultType(tp: Type) = tp match {
+                def transformResultType(tree: Tree, tp: Type) = tp match {
                   // skip formal arguments if in pattern mode (the args are subpatterns)
-                  case MethodType(_, rtp) if (inPatternMode(mode)) => rtp
+                  case MethodType(_, rtp) if (inPatternMode(mode)) =>
+                    tree setType rtp
                   case _ if opt.virtualize && fun.symbol.isConstructor && willReifyNew(tp) =>
-                    reifiedNewType(tp)
+                    val repTycon = inferRepTycon(tree)
+                    if (repTycon == NoType) tree else
+                    tree setType reifiedNewType(repTycon, tp)
                   case _ =>
-                    tp
+                    tree setType tp
                 }
 
                 // Replace the Delegate-Chainer methods += and -= with corresponding
@@ -3404,7 +3407,7 @@ trait Typers extends Modes with Adaptations with Tags {
                 if (args.isEmpty && !forInteractive && fun.symbol.isInitialized && ListModule.hasCompleteInfo && (fun.symbol == List_apply))
                   atPos(tree.pos)(gen.mkNil setType restpe)
                 else
-                  constfold(treeCopy.Apply(tree, fun, args1) setType transformResultType(restpe))
+                  constfold(transformResultType(treeCopy.Apply(tree, fun, args1), restpe))
               }
               handleMonomorphicCall
             } else if (needsInstantiation(tparams, formals, args)) {
@@ -3589,12 +3592,12 @@ trait Typers extends Modes with Adaptations with Tags {
 
     // if we filter out the getters but leave in the backing fields, member lookup breaks (e.g. when doing a selectDynamic)
     // and we get strange type errors...
-    // found   : java.lang.Object with Struct[Test.Rep]{val x: Int; val y: java.lang.String}
-    // required: Struct[Test.Rep]{val x: Int; val y: String}
+    // found   : java.lang.Object with Struct{val x: Int; val y: java.lang.String}
+    // required: Struct{val x: Int; val y: String}
     // to avoid duplicates, only retain methods
     // the fields will only be used indirectly, since the corresponding ValDef holds the RHS with the information we're after
-    private def reifiedNewType(tp: Type) = {
-      val repTycon = if(phase.erasedTypes) AnyClass.tpe else tp.baseType(EmbeddedControls_Struct).typeArgs(0) // TODO
+    private def reifiedNewType(repTycon: Type, tp: Type) = {
+      //val repTycon = if(phase.erasedTypes) AnyClass.tpe else tp.baseType(EmbeddedControls_Struct).typeArgs(0) // TODO
       val repSym = repTycon.typeSymbolDirect
       val ClassInfoType(parents, defSyms, origClass) = tp.typeSymbol.info
 
@@ -4135,7 +4138,7 @@ trait Typers extends Modes with Adaptations with Tags {
         val repVar = TypeVar(rep)
 
         for(
-          _ <- boolOpt((qual.tpe ne null) && qual.tpe <:< repVar.applyArgs(List(appliedType(structTp, List(repVar))))); // qual.tpe <:< ?Rep[Struct[?Rep]] -- not Struct[Any], because that requires covariance of Rep!?
+          _ <- boolOpt((qual.tpe ne null) && qual.tpe <:< repVar.applyArgs(List(structTp))); // qual.tpe <:< ?Rep[Struct]
           repTp <- listOpt(solvedTypes(List(repVar), List(rep), List(COVARIANT), false, -3)); // search for minimal solution
           // _ <- Some(println("mkInvoke repTp="+ repTp));
           // if so, generate an invocation and give it type `Rep[T]`, where T is the type given to member `name` in `decls`
@@ -6299,26 +6302,30 @@ trait Typers extends Modes with Adaptations with Tags {
       //  && tp.typeSymbol.info.isInstanceOf[ClassInfoType] // TODO: ??
     }
 
-    private def typedReifiedNew(templ: Template, tpt: Tree): Tree = {
+    private def inferRepTycon(tree: Tree): Type = {
       //println("__new in Scope: " + context.isNameInScope(nme._new))
-      val newMethod =
-        silent(_.typed1(Ident(nme._new), EXPRmode | FUNmode, WildcardType), false) match {
-          case SilentResultValue(t) => t
-          case ex =>
-          ErrorUtils.issueNormalTypeError(tpt,
+      silent(_.typed1(Ident(nme._new), EXPRmode | FUNmode, WildcardType), false) match {
+        case SilentResultValue(t) => t.tpe.finalResultType.typeConstructor
+        case ex =>
+          ErrorUtils.issueNormalTypeError(tree,
             """|There is no `__new` method in scope.
                |See the definition of `trait Struct` in EmbeddedControls for details.""".stripMargin.format())
-          return setError(tpt)
-        }
+          setError(tree)
+          NoType
+      }
+    }
+
+    private def typedReifiedNew(templ: Template, tpt: Tree): Tree = {
       val structBaseTp = tpt.tpe.baseType(EmbeddedControls_Struct)
       //val repTycon = if(phase.erasedTypes) AnyClass.tpe else structBaseTp.typeArgs(0) // TODO
-      val repTycon = newMethod.tpe.finalResultType.typeConstructor
+      val repTycon = inferRepTycon(tpt)
+      if (repTycon == NoType) { return tpt }
       val repSym = repTycon.typeSymbolDirect
       val ClassInfoType(_, defSyms, origClass) = tpt.tpe.typeSymbol.info
 
       debuglog("[TRN] origClass: " + (origClass.info.decls, origClass.ownerChain))
 
-      val repStructTp = reifiedNewType(tpt.tpe)
+      val repStructTp = reifiedNewType(repTycon, tpt.tpe)
 
       // TODO: remove once r25161 from main repo has been merged
       def elimAnonymousClass(t: Type) = t match {

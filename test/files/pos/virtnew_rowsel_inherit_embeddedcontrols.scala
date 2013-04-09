@@ -2,7 +2,7 @@ object Test extends App with EmbeddedControls { // test whether it works when we
   trait Rep[T]
   def __new[T](args: (String, Boolean, Rep[T] => Rep[_])*): Rep[T] = error("")
 
-  class MyStruct extends Struct[Rep]
+  class MyStruct extends Struct
   class ApplyDynamicOps {
     def selectDynamic[T](n: String): Rep[T] = error(n)
   }
