@@ -6300,8 +6300,19 @@ trait Typers extends Modes with Adaptations with Tags {
     }
 
     private def typedReifiedNew(templ: Template, tpt: Tree): Tree = {
+      //println("__new in Scope: " + context.isNameInScope(nme._new))
+      val newMethod =
+        silent(_.typed1(Ident(nme._new), EXPRmode | FUNmode, WildcardType), false) match {
+          case SilentResultValue(t) => t
+          case ex =>
+          ErrorUtils.issueNormalTypeError(tpt,
+            """|There is no `__new` method in scope.
+               |See the definition of `trait Struct` in EmbeddedControls for details.""".stripMargin.format())
+          return setError(tpt)
+        }
       val structBaseTp = tpt.tpe.baseType(EmbeddedControls_Struct)
-      val repTycon = if(phase.erasedTypes) AnyClass.tpe else structBaseTp.typeArgs(0) // TODO
+      //val repTycon = if(phase.erasedTypes) AnyClass.tpe else structBaseTp.typeArgs(0) // TODO
+      val repTycon = newMethod.tpe.finalResultType.typeConstructor
       val repSym = repTycon.typeSymbolDirect
       val ClassInfoType(_, defSyms, origClass) = tpt.tpe.typeSymbol.info
 
