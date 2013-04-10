@@ -1,16 +1,16 @@
 object Test extends App {
-  trait OptiML[R]
-  trait OptiMLExp[R] {
-    def apply(): R
-    def result: R = {
-      val r = apply()
+  trait OptiML
+  trait OptiMLExp[X] {
+    def apply: X
+    def result: X = {
+      val r = apply
       println(r)
       r
     }
   }
-  def OptiML[R](b: => R) = new Scope[OptiML[R], OptiMLExp[R], R](b)
+  def OptiML[R](b: => R) = new Scope[OptiML, OptiMLExp[R], R](b)
 
-  val x: String = OptiML[String] {
+  val x: String = OptiML {
     object meh
     val f = (x: Int) => "foo "+ x
     f(10)

@@ -4962,8 +4962,7 @@ trait Typers extends Modes with Adaptations with Tags {
        *    def apply: bodyType = body
        *  }
        *  class DSLrun extends DSLprog with OptiMLExp
-       *  (new DSLrun): OptiML with OptiMLExp
-       *
+       *  ((new DSLrun): OptiML with OptiMLExp).result
        */
       def tryTypedScope(funSym: Symbol, funTp: Type, args: List[Tree]): Tree = {
         def parentTypes(ps: Type*): List[Type] = { val parents = ps.toList; if(parents.head.typeSymbol.isTrait) ObjectClass.tpe :: parents else parents }
@@ -4976,6 +4975,7 @@ trait Typers extends Modes with Adaptations with Tags {
             val body = args(0) // looks like it hasn't been typed yet, so no need to rejig the owners etc
 
             assert(ifaceTp.typeSymbol.isTrait || ifaceTp.typeSymbol.primaryConstructor.info.paramTypes.isEmpty) // TODO: error message
+            assert(funSym.info.typeParams.exists(p => p.name == resTp.typeSymbol.name)) // TODO: error message
 
             // println("generating:\ntrait DSLprog extends %s {\n def apply: %s = %s \n } \n (new DSLprog with %s) : %s with %s".format(ifaceTp, bodyType, body, implTp, ifaceTp, implTp))
 
@@ -5018,12 +5018,13 @@ trait Typers extends Modes with Adaptations with Tags {
             } get
 
             val bodyFunType = functionType(Nil, bodyType)
-            val newTp = intersectionType(List(ifaceTp, implTp, bodyFunType))
+            val instantiatedImplTp = implTp.subst(List(resTp.typeSymbol), List(bodyType))
+            val newTp = intersectionType(List(ifaceTp, instantiatedImplTp, bodyFunType))
 
             // mix the scope class with the implementation trait and `() => $bodyFunType`
             val scopeAnonCls = {
               val clazz = context.owner.newClass(body.pos, newTypeName("DSLrun")) setFlag (SYNTHETIC)
-              clazz.setInfo(ClassInfoType(List(scopeClass.tpe, implTp, bodyFunType), newScope, clazz))
+              clazz.setInfo(ClassInfoType(List(scopeClass.tpe, instantiatedImplTp, bodyFunType), newScope, clazz))
               clazz
             }
 
