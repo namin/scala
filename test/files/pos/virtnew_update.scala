@@ -30,7 +30,7 @@ object Test extends App {
       res.asInstanceOf[Rep[T]]
     }
   }
-  val foo: Rep[Struct[Rep] { var xx: Int; val y: String }] = new Struct[Rep] { var xx = 23; val y = "y" }
+  val foo: Rep[Struct { var xx: Int; val y: String }] = new Struct { var xx = 23; val y = "y" }
   foo.xx = 3 // this works because the row has a mutable member xx of the right type -- otherwise it'll fail to typecheck (see the neg/ case)
   println(foo.xx = 3) // check that nested assigns work too
   println(foo.xx)

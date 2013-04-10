@@ -1,4 +1,4 @@
-/** Test virtualization of `new Struct[Rep] { val x_i = v_i }` and subsequent selects on new's result.
+/** Test virtualization of `new Struct { val x_i = v_i }` and subsequent selects on new's result.
  *
  * The test case is a dummy implementation of an query language DSL.
  * A full-blown implementation would make use of our LMS framework to reify the DSL program more precisely,
@@ -40,7 +40,7 @@ object Test extends EmbeddedControls with App {
     }
   }
 
-  class Result extends Struct[Rep]
+  class Result extends Struct
 
   case class LineItem(customerName: String)
 

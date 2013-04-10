@@ -17,7 +17,7 @@ object Test extends App {
   implicit def liftInt(x: Int) = new Const(x)
   implicit def liftFun(x: Int => Int) = new Const(x)
 
-  val foo : Rep[Struct[Rep] { val field: Int; val fun: Int => Int; var varia: Int }] = new Rep
+  val foo : Rep[Struct { val field: Int; val fun: Int => Int; var varia: Int }] = new Rep
   println(foo.field)    // println(foo.selectDynamic[Int]("field")(Manifest.Int)))
   println(foo.fun(1))   // println(foo.applyDynamic[Int => Int]("fun")(Manifest.classType[Int => Int](classOf[Function1], Manifest.Int, Manifest.Int)).apply(1))) -- note the implicit arg *before* the final .apply(1)!
   foo.varia = 10        // foo.updateDynamic[Int]("varia")(10)(Manifest.Int)

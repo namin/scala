@@ -1,12 +1,6 @@
-virtnew_repping.scala:4: error: type mismatch;
+virtnew_repping.scala:5: error: type mismatch;
  found   : Int(1)
  required: Test.Rep[Int]
     val a = 1 // a should be forced to have type Rep[Int]
             ^
-virtnew_repping.scala:3: error: since Test.Struct[Test.Rep]{val a: Int} <:< Test.Struct[Test.Rep], reification was attempted,
-but the result, `<__new: error>(scala.this.Tuple3.apply("a", false, ((self: Test.Rep[Test.Struct[Test.Rep]{val a: Int}]) => 1)))`, did not type check.
-Probable cause: there is no suitable `__new` method in scope.
-See the definition of `trait Struct` in EmbeddedControls for details.
-  val foo = new Struct[Rep] {
-            ^
-two errors found
+one error found

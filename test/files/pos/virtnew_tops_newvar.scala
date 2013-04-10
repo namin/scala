@@ -34,12 +34,12 @@ object Test extends App {
     }
   }
 
-  val foo = new Struct[Rep] {
+  val foo = new Struct {
       var xx = 2
       var yy = {xx = xx * 2; xx} // TODO: xx *= 2
     }
 
-  val bar = new Struct[Rep] {
+  val bar = new Struct {
       val xx = 2
       var yy = Const(() => xx * 2)
     }

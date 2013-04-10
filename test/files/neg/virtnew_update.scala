@@ -33,7 +33,7 @@ object Test extends App {
 
   // def __newVar[T](x: T): Rep[T] = Var(null, x)
 
-  val foo: Rep[Struct[Rep] { var xx: Int; val y: String }] = new Struct[Rep] { var xx = 23; val y = "y" }
+  val foo: Rep[Struct { var xx: Int; val y: String }] = new Struct { var xx = 23; val y = "y" }
   foo.xx = 3
   foo.y = 3 // should be disallowed
   foo.z = 3 // should be disallowed
