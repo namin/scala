@@ -1,7 +1,7 @@
 object Test extends EmbeddedControls {
   import scala.reflect.SourceContext
 
-  abstract class Record extends Struct[Rep]
+  abstract class Record extends Struct
   case class Rep[T:Manifest](x: T)
   def unit[T:Manifest](x: T) = Rep(x)
   implicit def numericToNumericRep[T:Numeric:Manifest](x: T) = unit(x)
