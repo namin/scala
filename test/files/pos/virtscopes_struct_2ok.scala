@@ -1,7 +1,7 @@
 object ScopeTest {
   abstract class Record extends Struct
 
-  trait Base extends EmbeddedControls {
+  trait Base/* extends EmbeddedControls*/ {
     type Rep[+T]
     protected def unit[T:Manifest](x: T): Rep[T]
   }

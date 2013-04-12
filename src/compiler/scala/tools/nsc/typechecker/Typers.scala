@@ -4129,7 +4129,8 @@ trait Typers extends Modes with Adaptations with Tags {
        */
       def structSelectedMember(qual: Tree, name: Name): Option[(Type, Symbol)] = if (opt.virtualize) {
         debuglog("[DNR] dynatype on struct for "+ qual +" : "+ qual.tpe +" <DOT> "+ name)
-        val structTp = (prefixInWith(context.owner, EmbeddedControlsClass) getOrElse PredefModule.tpe).memberType(EmbeddedControls_Struct)
+        //val structTp = (prefixInWith(context.owner, EmbeddedControlsClass) getOrElse PredefModule.tpe).memberType(EmbeddedControls_Struct)
+        val structTp = PredefModule.tpe.memberType(EmbeddedControls_Struct)
         debuglog("[DNR] context, tp "+ (context.owner.ownerChain, structTp))
 
         val rep = NoSymbol.newTypeParameter(newTypeName("Rep"))
