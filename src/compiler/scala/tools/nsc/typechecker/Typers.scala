@@ -4129,9 +4129,10 @@ trait Typers extends Modes with Adaptations with Tags {
        */
       def structSelectedMember(qual: Tree, name: Name): Option[(Type, Symbol)] = if (opt.virtualize) {
         debuglog("[DNR] dynatype on struct for "+ qual +" : "+ qual.tpe +" <DOT> "+ name)
-        //val structTp = (prefixInWith(context.owner, EmbeddedControlsClass) getOrElse PredefModule.tpe).memberType(EmbeddedControls_Struct)
-        val structTp = PredefModule.tpe.memberType(EmbeddedControls_Struct)
-        debuglog("[DNR] context, tp "+ (context.owner.ownerChain, structTp))
+        val structTps =
+          ((prefixInWith(context.owner, EmbeddedControlsClass).toList)
+           ++ List(PredefModule.tpe)).map(_.memberType(EmbeddedControls_Struct))
+        debuglog("[DNR] context, tp "+ (context.owner.ownerChain, structTps))
 
         val rep = NoSymbol.newTypeParameter(newTypeName("Rep"))
         val repTpar = rep.newTypeParameter(newTypeName("T")).setFlag(COVARIANT).setInfo(TypeBounds.empty)
@@ -4139,7 +4140,7 @@ trait Typers extends Modes with Adaptations with Tags {
         val repVar = TypeVar(rep)
 
         for(
-          _ <- boolOpt((qual.tpe ne null) && qual.tpe <:< repVar.applyArgs(List(structTp))); // qual.tpe <:< ?Rep[Struct]
+          _ <- listOpt(structTps.filter(structTp => (qual.tpe ne null) && qual.tpe <:< repVar.applyArgs(List(structTp)))); // qual.tpe <:< ?Rep[Struct]
           repTp <- listOpt(solvedTypes(List(repVar), List(rep), List(COVARIANT), false, -3)); // search for minimal solution
           // _ <- Some(println("mkInvoke repTp="+ repTp));
           // if so, generate an invocation and give it type `Rep[T]`, where T is the type given to member `name` in `decls`
