@@ -4775,6 +4775,9 @@ trait Typers extends Modes with Adaptations with Tags {
           checkDead(typedQualifier(qual, mode))
 */
 
+        val prevRetyping = context.retyping
+        context.retyping = true
+        try {
           val qual1 = if (isApply) silent(t => checkDead(t.typedQualifier(qual, forFunMode(mode))), false, tree) match {
             case SilentResultValue(qual1) => qual1
             case SilentTypeError(ex) =>
@@ -4937,6 +4940,9 @@ trait Typers extends Modes with Adaptations with Tags {
                 doDefault()
             }
           }
+        } finally {
+          context.retyping = prevRetyping
+        }
       }
 
 
@@ -6334,6 +6340,7 @@ trait Typers extends Modes with Adaptations with Tags {
       // setup the typer for the stats
       // the stats must be typed to detect the self reference, so that selections on the self-variable can be rewritten
       val statTyper = newTyper(context.make(templ, origClass, newScope)) //.typedStats(statsUntyped.toList, templ.symbol)
+      statTyper.context.retyping = true
       if (templ.symbol == NoSymbol) templ setSymbol origClass.newLocalDummy(templ.pos)
       val self1 = templ.self match {
         case vd @ ValDef(mods, name, tpt, EmptyTree) =>
