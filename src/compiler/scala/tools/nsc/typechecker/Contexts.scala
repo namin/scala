@@ -84,6 +84,8 @@ trait Contexts { self: Analyzer =>
         case Import(qual, _) => qual.tpe = singleType(qual.symbol.owner.thisType, qual.symbol)
         case _ =>
       }
+      sc.flushAndReturnBuffer()
+      sc.flushAndReturnWarningsBuffer()
       sc = sc.outer
     }
   }
@@ -118,7 +120,7 @@ trait Contexts { self: Analyzer =>
                                                     // not inherited to child contexts
     var depth: Int = 0
     var imports: List[ImportInfo] = List()   // currently visible imports
-    var openImplicits: List[(Type,Tree)] = List()   // types for which implicit arguments
+    var openImplicits: List[OpenImplicit] = List() // types for which implicit arguments
                                              // are currently searched
     // for a named application block (Tree) the corresponding NamedApplyInfo
     var namedApplyBlockInfo: Option[(Tree, NamedApplyInfo)] = None
@@ -644,7 +646,14 @@ trait Contexts { self: Analyzer =>
         new ImplicitInfo(sym.name, pre, sym)
 
     private def collectImplicitImports(imp: ImportInfo): List[ImplicitInfo] = {
-      val pre = imp.qual.tpe
+      val qual = imp.qual
+
+      val pre =
+        if (qual.tpe.typeSymbol.isPackageClass)
+          // SI-6225 important if the imported symbol is inherited by the the package object.
+          singleType(qual.tpe, qual.tpe member nme.PACKAGE)
+        else
+          qual.tpe
       def collect(sels: List[ImportSelector]): List[ImplicitInfo] = sels match {
         case List() =>
           List()

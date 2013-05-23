@@ -67,7 +67,10 @@ abstract class SuperAccessors extends transform.Transform with transform.TypingT
           case t                                  => t
         }
         acc setInfoAndEnter (tpe cloneInfo acc)
-        storeAccessorDefinition(clazz, DefDef(acc, EmptyTree))
+        // Diagnostic for SI-7091
+        if (!accDefs.contains(clazz))
+          reporter.error(sel.pos, s"Internal error: unable to store accessor definition in ${clazz}. clazz.isPackage=${clazz.isPackage}. Accessor required for ${sel} (${showRaw(sel)})")
+        else storeAccessorDefinition(clazz, DefDef(acc, EmptyTree))
         acc
       }
 
@@ -77,30 +80,9 @@ abstract class SuperAccessors extends transform.Transform with transform.TypingT
     private def transformArgs(params: List[Symbol], args: List[Tree]) = {
       treeInfo.mapMethodParamsAndArgs(params, args) { (param, arg) =>
         if (isByNameParamType(param.tpe))
-          withInvalidOwner { checkPackedConforms(transform(arg), param.tpe.typeArgs.head) }
+          withInvalidOwner(transform(arg))
         else transform(arg)
       }
-    }
-
-    private def checkPackedConforms(tree: Tree, pt: Type): Tree = {
-      def typeError(typer: analyzer.Typer, pos: Position, found: Type, req: Type) {
-        if (!found.isErroneous && !req.isErroneous) {
-          val msg = analyzer.ErrorUtils.typeErrorMsg(found, req, typer.infer.isPossiblyMissingArgs(found, req))
-          typer.context.error(pos, analyzer.withAddendum(pos)(msg))
-          if (settings.explaintypes.value)
-            explainTypes(found, req)
-        }
-      }
-
-      if (tree.tpe exists (_.typeSymbol.isExistentialSkolem)) {
-        val packed = localTyper.packedType(tree, NoSymbol)
-        if (!(packed <:< pt)) {
-          val errorContext = localTyper.context.make(localTyper.context.tree)
-          errorContext.setReportErrors()
-          typeError(analyzer.newTyper(errorContext), tree.pos, packed, pt)
-        }
-      }
-      tree
     }
 
     /** Check that a class and its companion object to not both define
@@ -264,9 +246,16 @@ abstract class SuperAccessors extends transform.Transform with transform.TypingT
                 }
               }
 
-              // direct calls to aliases of param accessors to the superclass in order to avoid
+
+              def isAccessibleFromSuper(sym: Symbol) = {
+                val pre = SuperType(sym.owner.tpe, qual.tpe)
+                localTyper.context.isAccessible(sym, pre, superAccess = true)
+              }
+
+              // Direct calls to aliases of param accessors to the superclass in order to avoid
               // duplicating fields.
-              if (sym.isParamAccessor && sym.alias != NoSymbol) {
+              // ... but, only if accessible (SI-6793)
+              if (sym.isParamAccessor && sym.alias != NoSymbol && isAccessibleFromSuper(sym.alias)) {
                 val result = (localTyper.typedPos(tree.pos) {
                   Select(Super(qual, tpnme.EMPTY) setPos qual.pos, sym.alias)
                 }).asInstanceOf[Select]
@@ -288,6 +277,7 @@ abstract class SuperAccessors extends transform.Transform with transform.TypingT
                      currentClass.isTrait
                   && sym.isProtected
                   && sym.enclClass != currentClass
+                  && !sym.owner.isPackageClass // SI-7091 no accessor needed package owned (ie, top level) symbols
                   && !sym.owner.isTrait
                   && (sym.owner.enclosingPackageClass != currentClass.enclosingPackageClass)
                   && (qual.symbol.info.member(sym.name) ne NoSymbol)

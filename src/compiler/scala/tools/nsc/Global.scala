@@ -23,6 +23,7 @@ import plugins.Plugins
 import ast._
 import ast.parser._
 import typechecker._
+import transform.patmat.PatternMatching
 import transform._
 import backend.icode.{ ICodes, GenICode, ICodeCheckers }
 import backend.{ ScalaPrimitives, Platform, MSILPlatform, JavaPlatform }
@@ -1179,7 +1180,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
 
       ("\n" + info1) :: info2 :: info3 mkString "\n\n"
     }
-    catch { case x: Exception => errorMessage }
+    catch { case _: Exception | _: TypeError => errorMessage }
 
   /** The id of the currently active run
    */

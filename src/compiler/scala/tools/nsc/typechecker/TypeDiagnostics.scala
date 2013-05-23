@@ -111,14 +111,9 @@ trait TypeDiagnostics {
       "\n(Note that variables need to be initialized to be defined)"
     else ""
 
-  /** Only prints the parameter names if they're not synthetic,
-   *  since "x$1: Int" does not offer any more information than "Int".
-   */
   private def methodTypeErrorString(tp: Type) = tp match {
     case mt @ MethodType(params, resultType)  =>
-      def forString =
-        if (params exists (_.isSynthetic)) params map (_.tpe)
-        else params map (_.defString)
+      def forString = params map (_.defString)
 
        forString.mkString("(", ",", ")") + resultType
     case x                                    => x.toString
@@ -291,6 +286,24 @@ trait TypeDiagnostics {
     )
   }
 
+  def typePatternAdvice(sym: Symbol, ptSym: Symbol) = {
+    val clazz = if (sym.isModuleClass) sym.companionClass else sym
+    val caseString =
+      if (clazz.isCaseClass && (clazz isSubClass ptSym))
+        ( clazz.caseFieldAccessors
+          map (_ => "_")    // could use the actual param names here
+          mkString (s"`case ${clazz.name}(", ",", ")`")
+        )
+      else
+        "`case _: " + (clazz.typeParams match {
+          case Nil  => "" + clazz.name
+          case xs   => xs map (_ => "_") mkString (clazz.name + "[", ",", "]")
+        })+ "`"
+
+    "\nNote: if you intended to match against the class, try "+ caseString
+
+  }
+
   case class TypeDiag(tp: Type, sym: Symbol) extends Ordered[TypeDiag] {
     // save the name because it will be mutated until it has been
     // distinguished from the other types in the same error message
@@ -427,17 +440,24 @@ trait TypeDiagnostics {
       contextWarning(pos, "imported `%s' is permanently hidden by definition of %s".format(hidden, defn.fullLocationString))
 
     object checkDead {
-      private var expr: Symbol = NoSymbol
+      private val exprStack: mutable.Stack[Symbol] = mutable.Stack(NoSymbol)
+      // The method being applied to `tree` when `apply` is called.
+      private def expr = exprStack.top
 
       private def exprOK =
         (expr != Object_synchronized) &&
         !(expr.isLabel && treeInfo.isSynthCaseSymbol(expr)) // it's okay to jump to matchEnd (or another case) with an argument of type nothing
 
-      private def treeOK(tree: Tree) = tree.tpe != null && tree.tpe.typeSymbol == NothingClass
+      private def treeOK(tree: Tree) = {
+        val isLabelDef = tree match { case _: LabelDef => true; case _ => false}
+        tree.tpe != null && tree.tpe.typeSymbol == NothingClass && !isLabelDef
+      }
 
-      def updateExpr(fn: Tree) = {
-        if (fn.symbol != null && fn.symbol.isMethod && !fn.symbol.isConstructor)
-          checkDead.expr = fn.symbol
+      @inline def updateExpr[A](fn: Tree)(f: => A) = {
+        if (fn.symbol != null && fn.symbol.isMethod && !fn.symbol.isConstructor) {
+          exprStack push fn.symbol
+          try f finally exprStack.pop()
+        } else f
       }
       def apply(tree: Tree): Tree = {
         // Error suppression will squash some of these warnings unless we circumvent it.

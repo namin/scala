@@ -17,7 +17,7 @@ abstract class TreeInfo {
   val global: SymbolTable
 
   import global._
-  import definitions.{ isVarArgsList, isCastSymbol, ThrowableClass, TupleClass, MacroContextClass, MacroContextPrefixType }
+  import definitions.{ isTupleSymbol, isVarArgsList, isCastSymbol, ThrowableClass, TupleClass, MacroContextClass, MacroContextPrefixType }
 
   /* Does not seem to be used. Not sure what it does anyway.
   def isOwnerDefinition(tree: Tree): Boolean = tree match {
@@ -98,7 +98,8 @@ abstract class TreeInfo {
       // However, before typing, applications of nullary functional values are also
       // Apply(function, Nil) trees. To prevent them from being treated as pure,
       // we check that the callee is a method.
-      fn.symbol.isMethod && !fn.symbol.isLazy && isExprSafeToInline(fn)
+      // The callee might also be a Block, which has a null symbol, so we guard against that (SI-7185)
+      fn.symbol != null && fn.symbol.isMethod && !fn.symbol.isLazy && isExprSafeToInline(fn)
     case Typed(expr, _) =>
       isExprSafeToInline(expr)
     case Block(stats, expr) =>
@@ -513,6 +514,20 @@ abstract class TreeInfo {
     case Star(_)  => true
     case _        => false
   }
+
+  /**
+   * {{{
+   * //------------------------ => effectivePatternArity(args)
+   * case Extractor(a)          => 1
+   * case Extractor(a, b)       => 2
+   * case Extractor((a, b))     => 2
+   * case Extractor(a @ (b, c)) => 2
+   * }}}
+   */
+  def effectivePatternArity(args: List[Tree]): Int = (args.map(unbind) match {
+    case Apply(fun, xs) :: Nil if isTupleSymbol(fun.symbol) => xs
+    case xs                                                 => xs
+  }).length
 
 
   // used in the symbols for labeldefs and valdefs emitted by the pattern matcher

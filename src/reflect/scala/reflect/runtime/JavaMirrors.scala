@@ -133,6 +133,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       sm"""Scala field ${sym.name} isn't represented as a Java field, neither it has a Java accessor method
           |note that private parameters of class constructors don't get mapped onto fields and/or accessors,
           |unless they are used outside of their declaring constructors.""")
+    @deprecated("corresponding check has been removed from FieldMirror.set, this method is also being phased out", "2.11.0")
     private def ErrorSetImmutableField(sym: Symbol) = throw new ScalaReflectionException(s"cannot set an immutable field ${sym.name}")
     private def ErrorNotConstructor(sym: Symbol, owner: Symbol) = throw new ScalaReflectionException(s"expected a constructor of $owner, you provided $sym")
     private def ErrorFree(member: Symbol, freeType: Symbol) = throw new ScalaReflectionException(s"cannot reflect ${member.kindString} ${member.name}, because it's a member of a weak type ${freeType.name}")
@@ -282,9 +283,13 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       }
       def get = jfield.get(receiver)
       def set(value: Any) = {
-        if (!symbol.isMutable) ErrorSetImmutableField(symbol)
+        // it appears useful to be able to set values of vals, therefore I'm disabling this check
+        // if (!symbol.isMutable) ErrorSetImmutableField(symbol)
         jfield.set(receiver, value)
       }
+      // this dummy method is necessary to prevent the optimizer from stripping off ErrorSetImmutableField
+      // which would break binary compatibility with 2.10.0
+      private def dummy(symbol: Symbol) = ErrorSetImmutableField(symbol)
       override def toString = s"field mirror for ${symbol.fullName} (bound to $receiver)"
     }
 
@@ -687,7 +692,8 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           (if (jModifier.isStatic(mods)) module.moduleClass else clazz).info.decls enter sym
 
         for (jinner <- jclazz.getDeclaredClasses) {
-          enter(jclassAsScala(jinner, clazz), jinner.getModifiers)
+          jclassAsScala(jinner) // inner class is entered as a side-effect
+                                // no need to call enter explicitly
         }
 
         pendingLoadActions = { () =>
@@ -1046,13 +1052,17 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
      *  @param jclazz  The Java class
      *  @return A Scala class symbol that wraps all reflection info of `jclazz`
      */
-    private def jclassAsScala(jclazz: jClass[_]): Symbol = jclassAsScala(jclazz, sOwner(jclazz))
+    private def jclassAsScala(jclazz: jClass[_]): Symbol = {
+      val clazz = sOwner(jclazz) // sOwner called outside of closure for binary compatibility
+      toScala(classCache, jclazz){ (mirror, jclazz) =>
+        mirror.jclassAsScala(jclazz, clazz)
+      }
+    }
 
     private def jclassAsScala(jclazz: jClass[_], owner: Symbol): ClassSymbol = {
-      val name = scalaSimpleName(jclazz)
-      val completer = (clazz: Symbol, module: Symbol) => new FromJavaClassCompleter(clazz, module, jclazz)
-      val (clazz, module) = createClassModule(owner, name, completer)
-      classCache enter (jclazz, clazz)
+      val name       = scalaSimpleName(jclazz)
+      val completer  = (clazz: Symbol, module: Symbol) => new FromJavaClassCompleter(clazz, module, jclazz)
+      val (clazz, _) = createClassModule(owner, name, completer)
       clazz
     }
 

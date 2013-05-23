@@ -78,7 +78,7 @@ abstract class SpecializeTypes extends InfoTransform with TypingTransformers {
    */
 
   /** For a given class and concrete type arguments, give its specialized class */
-  val specializedClass: mutable.Map[(Symbol, TypeEnv), Symbol] = new mutable.LinkedHashMap
+  val specializedClass = perRunCaches.newMap[(Symbol, TypeEnv), Symbol]
 
   /** Map a method symbol to a list of its specialized overloads in the same class. */
   private val overloads = perRunCaches.newMap[Symbol, List[Overload]]() withDefaultValue Nil
@@ -796,7 +796,11 @@ abstract class SpecializeTypes extends InfoTransform with TypingTransformers {
   private def normalizeMember(owner: Symbol, sym: Symbol, outerEnv: TypeEnv): List[Symbol] = {
     sym :: (
       if (!sym.isMethod || beforeTyper(sym.typeParams.isEmpty)) Nil
-      else {
+      else if (sym.hasDefault) {
+        /* Specializing default getters is useless, also see SI-7329 . */
+        sym.resetFlag(SPECIALIZED)
+        Nil
+      } else {
         // debuglog("normalizeMember: " + sym.fullNameAsName('.').decode)
         var specializingOn = specializedParams(sym)
         val unusedStvars   = specializingOn filterNot specializedTypeVars(sym.info)
@@ -976,27 +980,24 @@ abstract class SpecializeTypes extends InfoTransform with TypingTransformers {
           debuglog("specialized overload %s for %s in %s: %s".format(om, overriding.name.decode, pp(env), om.info))
           typeEnv(om) = env
           addConcreteSpecMethod(overriding)
-          info(om) = (
-            if (overriding.isDeferred) {    // abstract override
-              debuglog("abstract override " + overriding.fullName + " with specialized " + om.fullName)
-              Forward(overriding)
+          if (overriding.isDeferred) {    // abstract override
+            debuglog("abstract override " + overriding.fullName + " with specialized " + om.fullName)
+            info(om) = Forward(overriding)
+          }
+          else {
+            // if the override is a normalized member, 'om' gets the
+            // implementation from its original target, and adds the
+            // environment of the normalized member (that is, any
+            // specialized /method/ type parameter bindings)
+            info get overriding match {
+              case Some(NormalizedMember(target)) =>
+                typeEnv(om) = env ++ typeEnv(overriding)
+                info(om) = Forward(target)
+              case _ =>
+                info(om) = SpecialOverride(overriding)
             }
-            else {
-              // if the override is a normalized member, 'om' gets the
-              // implementation from its original target, and adds the
-              // environment of the normalized member (that is, any
-              // specialized /method/ type parameter bindings)
-              val impl = info get overriding match {
-                case Some(NormalizedMember(target)) =>
-                  typeEnv(om) = env ++ typeEnv(overriding)
-                  target
-                case _ =>
-                  overriding
-              }
-              info(overriding) = Forward(om setPos overriding.pos)
-              SpecialOverride(impl)
-            }
-          )
+            info(overriding) = Forward(om setPos overriding.pos)
+          }
           newOverload(overriding, om, env)
           ifDebug(afterSpecialize(assert(
             overridden.owner.info.decl(om.name) != NoSymbol,
@@ -1776,21 +1777,17 @@ abstract class SpecializeTypes extends InfoTransform with TypingTransformers {
 
     /** Create specialized class definitions */
     def implSpecClasses(trees: List[Tree]): List[Tree] = {
-      val buf = new mutable.ListBuffer[Tree]
-      for (tree <- trees)
-        tree match {
-          case ClassDef(_, _, _, impl) =>
-            tree.symbol.info // force specialization
-            for (((sym1, env), specCls) <- specializedClass if sym1 == tree.symbol) {
-              val parents = specCls.info.parents.map(TypeTree)
-              buf +=
-                ClassDef(specCls, atPos(impl.pos)(Template(parents, emptyValDef, List()))
-                           .setSymbol(specCls.newLocalDummy(sym1.pos))) setPos tree.pos
-              debuglog("created synthetic class: " + specCls + " of " + sym1 + " in " + pp(env))
-            }
-          case _ =>
-        }
-      buf.toList
+      trees flatMap {
+        case tree @ ClassDef(_, _, _, impl) =>
+          tree.symbol.info // force specialization
+          for (((sym1, env), specCls) <- specializedClass if sym1 == tree.symbol) yield {
+            debuglog("created synthetic class: " + specCls + " of " + sym1 + " in " + pp(env))
+            val parents = specCls.info.parents.map(TypeTree)
+            ClassDef(specCls, atPos(impl.pos)(Template(parents, emptyValDef, List()))
+              .setSymbol(specCls.newLocalDummy(sym1.pos))) setPos tree.pos
+          }
+        case _ => Nil
+      } sortBy (_.name.decoded)
     }
   }
 

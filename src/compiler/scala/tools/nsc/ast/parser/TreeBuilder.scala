@@ -243,8 +243,13 @@ abstract class TreeBuilder {
     else CompoundTypeTree(Template(tps, emptyValDef, Nil))
 
   /** Create tree representing a while loop */
-  def makeWhile(lname: TermName, cond: Tree, body: Tree): Tree = {
-    val continu = atPos(o2p(body.pos pointOrElse wrappingPos(List(cond, body)).pos.endOrPoint)) { Apply(Ident(lname), Nil) }
+  def makeWhile(startPos: Int, cond: Tree, body: Tree): Tree = {
+    val lname = freshTermName(nme.WHILE_PREFIX)
+    def default = wrappingPos(List(cond, body)) match {
+      case p if p.isDefined => p.endOrPoint
+      case _                => startPos
+    }
+    val continu = atPos(o2p(body.pos pointOrElse default)) { Apply(Ident(lname), Nil) }
     val rhs = If(cond, Block(List(body), continu), Literal(Constant()))
     LabelDef(lname, Nil, rhs)
   }
@@ -256,7 +261,7 @@ abstract class TreeBuilder {
     def makeAssign(lhs: Tree, rhs: Tree): Tree
 
     /** Create tree representing a while loop */
-    def makeWhileDo(cond: Tree, body: Tree): Tree
+    def makeWhileDo(startPos: Int, cond: Tree, body: Tree): Tree
 
     /** Create tree representing a do-while loop */
     def makeDoWhile(body: Tree, cond: Tree): Tree
@@ -283,7 +288,7 @@ abstract class TreeBuilder {
   @inline final def makeAssign(lhs: Tree, rhs: Tree): Tree = builder.makeAssign(lhs, rhs)
 
   /** Create tree representing a while loop */
-  @inline final def makeWhileDo(cond: Tree, body: Tree): Tree = builder.makeWhileDo(cond, body)
+  @inline final def makeWhileDo(startPos: Int, cond: Tree, body: Tree): Tree = builder.makeWhileDo(startPos, cond, body)
 
   /** Create tree representing a do-while loop */
   @inline final def makeDoWhile(body: Tree, cond: Tree): Tree = builder.makeDoWhile(body, cond)
@@ -311,9 +316,13 @@ abstract class TreeBuilder {
     }
 
     /** Create tree representing a while loop */
-    def makeWhileDo(cond: Tree, body: Tree): Tree = {
-      val lname: Name = freshTermName(nme.WHILE_PREFIX)
-      val continu = atPos(o2p(body.pos.endOrPoint)) { Apply(Ident(lname), Nil) }
+    def makeWhileDo(startPos: Int, cond: Tree, body: Tree): Tree = {
+      val lname = freshTermName(nme.WHILE_PREFIX)
+      def default = wrappingPos(List(cond, body)) match {
+        case p if p.isDefined => p.endOrPoint
+        case _                => startPos
+      }
+      val continu = atPos(o2p(body.pos pointOrElse default)) { Apply(Ident(lname), Nil) }
       val rhs = If(cond, Block(List(body), continu), Literal(Constant()))
       LabelDef(lname, Nil, rhs)
     }
@@ -354,7 +363,7 @@ abstract class TreeBuilder {
     }
 
     /** Create tree representing a while loop */
-    def makeWhileDo(cond: Tree, body: Tree): Tree =
+    def makeWhileDo(startPos: Int, cond: Tree, body: Tree): Tree =
       Apply(Ident(nme._whileDo), List(cond, body))
 
     /** Create tree representing a do-while loop */
@@ -711,7 +720,7 @@ abstract class TreeBuilder {
     if (contextBounds.isEmpty) vparamss
     else {
       val mods = Modifiers(if (owner.isTypeName) PARAMACCESSOR | LOCAL | PRIVATE else PARAM)
-      def makeEvidenceParam(tpt: Tree) = ValDef(mods | IMPLICIT, freshTermName(nme.EVIDENCE_PARAM_PREFIX), tpt, EmptyTree)
+      def makeEvidenceParam(tpt: Tree) = ValDef(mods | IMPLICIT | SYNTHETIC, freshTermName(nme.EVIDENCE_PARAM_PREFIX), tpt, EmptyTree)
       val evidenceParams = contextBounds map makeEvidenceParam
 
       val vparamssLast = if(vparamss.nonEmpty) vparamss.last else Nil

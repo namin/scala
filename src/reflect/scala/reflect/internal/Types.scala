@@ -391,8 +391,8 @@ trait Types extends api.Types { self: SymbolTable =>
      *  This is assessed to be the case if the class is final,
      *  and all type parameters (if any) are invariant.
      */
-    def isFinalType =
-      typeSymbol.isFinal && (typeSymbol.typeParams forall symbolIsNonVariant)
+    def isFinalType: Boolean =
+      typeSymbol.isFinal && (typeSymbol.typeParams forall symbolIsNonVariant) && prefix.isStable
 
     /** Is this type completed (i.e. not a lazy type)? */
     def isComplete: Boolean = true
@@ -3052,6 +3052,12 @@ trait Types extends api.Types { self: SymbolTable =>
     val origin: Type,
     var constr: TypeConstraint
   ) extends Type {
+
+    // We don't want case class equality/hashing as TypeVar-s are mutable,
+    // and TypeRefs based on them get wrongly `uniqued` otherwise. See SI-7226.
+    override def hashCode(): Int = System.identityHashCode(this)
+    override def equals(other: Any): Boolean = this eq other.asInstanceOf[AnyRef]
+
     def untouchable = false   // by other typevars
     override def params: List[Symbol] = Nil
     override def typeArgs: List[Type] = Nil
@@ -3070,12 +3076,14 @@ trait Types extends api.Types { self: SymbolTable =>
     /** The variable's skolemization level */
     val level = skolemizationLevel
 
-    /** Two occurrences of a higher-kinded typevar, e.g. `?CC[Int]` and `?CC[String]`, correspond to
-     *  ''two instances'' of `TypeVar` that share the ''same'' `TypeConstraint`.
+    /** Applies this TypeVar to type arguments, if arity matches.
      *
-     *  `constr` for `?CC` only tracks type constructors anyway,
-     *   so when `?CC[Int] <:< List[Int]` and `?CC[String] <:< Iterable[String]`
-     *  `?CC's` hibounds contains List and Iterable.
+     * Different applications of the same type constructor variable `?CC`,
+     * e.g. `?CC[Int]` and `?CC[String]`, are modeled as distinct instances of `TypeVar`
+     * that share a `TypeConstraint`, so that the comparisons `?CC[Int] <:< List[Int]`
+     * and `?CC[String] <:< Iterable[String]` result in `?CC` being upper-bounded by `List` and `Iterable`.
+     *
+     * Applying the wrong number of type args results in a TypeVar whose instance is set to `ErrorType`.
      */
     def applyArgs(newArgs: List[Type]): TypeVar = (
       if (newArgs.isEmpty && typeArgs.isEmpty)
@@ -3085,7 +3093,7 @@ trait Types extends api.Types { self: SymbolTable =>
         TypeVar.trace("applyArgs", "In " + originLocation + ", apply args " + newArgs.mkString(", ") + " to " + originName)(tv)
       }
       else
-        throw new Error("Invalid type application in TypeVar: " + params + ", " + newArgs)
+        TypeVar(typeSymbol).setInst(ErrorType)
     )
     // newArgs.length may differ from args.length (could've been empty before)
     //
@@ -3115,13 +3123,14 @@ trait Types extends api.Types { self: SymbolTable =>
     // <region name="constraint mutators + undoLog">
     // invariant: before mutating constr, save old state in undoLog
     // (undoLog is used to reset constraints to avoid piling up unrelated ones)
-    def setInst(tp: Type) {
+    def setInst(tp: Type): this.type = {
 //      assert(!(tp containsTp this), this)
       undoLog record this
       // if we were compared against later typeskolems, repack the existential,
       // because skolems are only compatible if they were created at the same level
       val res = if (shouldRepackType) repackExistential(tp) else tp
       constr.inst = TypeVar.trace("setInst", "In " + originLocation + ", " + originName + "=" + res)(res)
+      this
     }
 
     def addLoBound(tp: Type, isNumericBound: Boolean = false) {
@@ -5030,10 +5039,11 @@ trait Types extends api.Types { self: SymbolTable =>
       if (tp.isTrivial) tp
       else if (tp.prefix.typeSymbol isNonBottomSubClass owner) {
         val widened = tp match {
-          case _: ConstantType => tp        // Java enum constants: don't widen to the enum type!
-          case _               => tp.widen  // C.X.type widens to C.this.X.type, otherwise `tp asSeenFrom (pre, C)` has no effect.
+          case _: ConstantType => tp // Java enum constants: don't widen to the enum type!
+          case _               => tp.widen // C.X.type widens to C.this.X.type, otherwise `tp asSeenFrom (pre, C)` has no effect.
         }
-        widened asSeenFrom (pre, tp.typeSymbol.owner)
+        val memType = widened asSeenFrom (pre, tp.typeSymbol.owner)
+        if (tp eq widened) memType else memType.narrow
       }
       else loop(tp.prefix) memberType tp.typeSymbol
 
@@ -5365,7 +5375,9 @@ trait Types extends api.Types { self: SymbolTable =>
       case _ =>
         NoType
     }
-    patType match {
+    // See the test for SI-7214 for motivation for dealias. Later `treeCondStrategy#outerTest`
+    // generates an outer test based on `patType.prefix` with automatically dealises.
+    patType.dealias match {
       case TypeRef(pre, sym, args) =>
         val pre1 = maybeCreateDummyClone(pre, sym)
         (pre1 ne NoType) && isPopulated(copyTypeRef(patType, pre1, sym, args), selType)
