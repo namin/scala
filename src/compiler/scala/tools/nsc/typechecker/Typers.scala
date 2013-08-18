@@ -6301,7 +6301,12 @@ trait Typers extends Modes with Adaptations with Tags {
     }
 
     private def willReifyNewCase(tree: Tree, fun0: Tree): Boolean = opt.virtualize && (phase.id <= currentRun.typerPhase.id) && {
-      fun0.symbol.owner.isModuleClass && fun0.symbol.owner.companionClass.isCaseClass &&
+      fun0 != null &&
+      fun0.symbol != NoSymbol &&
+      fun0.symbol != null &&
+      fun0.symbol.owner != null &&
+      fun0.symbol.owner.isModuleClass &&
+      fun0.symbol.owner.companionClass.isCaseClass &&
       fun0.symbol.owner.companionClass.selfType.baseType(EmbeddedControls_Struct) != NoType &&
       inferRepTycon(tree) != NoType
     }
