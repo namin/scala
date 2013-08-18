@@ -1,0 +1,6 @@
+virtnew_case.scala:7: error: type mismatch;
+ found   : Boolean(false)
+ required: Double
+  val c = Complex(unit(false), unit(2.0))
+                       ^
+one error found

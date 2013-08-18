@@ -3147,6 +3147,9 @@ trait Typers extends Modes with Adaptations with Tags {
     }
 
     def doTypedApply(tree: Tree, fun0: Tree, args: List[Tree], mode: Int, pt: Type): Tree = {
+      if (willReifyNewCase(tree, fun0)) {
+        return typedReifiedNewCase(tree, fun0, args, mode, pt)
+      }
       // TODO_NMT: check the assumption that args nonEmpty
       def duplErrTree = setError(treeCopy.Apply(tree, fun0, args))
       def duplErrorTree(err: AbsTypeError) = { issue(err); duplErrTree }
@@ -6297,6 +6300,12 @@ trait Typers extends Modes with Adaptations with Tags {
       //  && tp.typeSymbol.info.isInstanceOf[ClassInfoType] // TODO: ??
     }
 
+    private def willReifyNewCase(tree: Tree, fun0: Tree): Boolean = opt.virtualize && (phase.id <= currentRun.typerPhase.id) && {
+      fun0.symbol.owner.isModuleClass && fun0.symbol.owner.companionClass.isCaseClass &&
+      fun0.symbol.owner.companionClass.selfType.baseType(EmbeddedControls_Struct) != NoType &&
+      inferRepTycon(tree) != NoType
+    }
+
     private def inferRepTycon(tree: Tree): Type = {
       //println("__new in Scope: " + context.isNameInScope(nme._new))
       silent(_.typed1(Ident(nme._new), EXPRmode | FUNmode, WildcardType), false) match {
@@ -6307,6 +6316,38 @@ trait Typers extends Modes with Adaptations with Tags {
                |See the definition of `trait Struct` in EmbeddedControls for details.""".stripMargin.format())
           setError(tree)
           NoType
+      }
+    }
+
+    private def typedReifiedNewCase(tree: Tree, fun0: Tree, args: List[Tree], mode: Int, pt: Type): Tree = {
+      val tp = fun0.symbol.owner.companionClass.selfType
+      val structBaseTp = tp.baseType(EmbeddedControls_Struct)
+      val repTycon = inferRepTycon(tree)
+      val repSym = repTycon.typeSymbolDirect
+      val repTp = appliedType(repTycon, List(tp))
+      val params = fun0.symbol.info.params
+      val namedArgs = params.zip(args)
+      val selfName = newTermName("self")
+      val newArgs = for ((param, arg) <- namedArgs) yield {
+        val funSym = fun0.symbol.owner.newValue(nme.ANON_FUN_NAME, arg.pos).setFlag(SYNTHETIC).setInfo(NoType)
+        val selfSym = funSym.newValueParameter(selfName, arg.pos) setInfo repTp
+        val paramTp = param.tpe
+        val rhsType = appliedType(repTycon, List(paramTp))
+        val typedArg = typed1(arg, EXPRmode, rhsType)
+        val rhs = Function(List(ValDef(selfSym)), typedArg)
+        gen.mkTuple(List(Literal(Constant(param.name.toString)), Literal(Constant(false)), rhs))
+      }
+      val newCall = Apply(Ident(nme._new) setPos fun0.pos, newArgs.toList) setPos tree.pos
+      silent(_.typed1(newCall, EXPRmode, repTp), false) match {
+        case SilentResultValue(res) => res
+        case ex =>
+          debuglog("[TRN] typedReifiedNewCase failed: "+ ex)
+          ErrorUtils.issueNormalTypeError(tree,
+            """|since %s <:< %s, reification was attempted,
+               |but the result, `%s`, did not type check.
+               |Probable cause: there is no suitable `__new` method in scope.
+               |See the definition of `trait Struct` in EmbeddedControls for details.""".stripMargin.format(tp, structBaseTp, newCall))
+          setError(newCall)
       }
     }
 
