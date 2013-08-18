@@ -6296,7 +6296,8 @@ trait Typers extends Modes with Adaptations with Tags {
       //  also, haven't figured out yet how to deal with varargs after erasure
 
       tp.typeSymbol != NoSymbol && !tp.typeSymbol.owner.isJavaDefined && // avoid illegal cyclic references during quick.lib (e.g., no need to reify new AnyRef etc)
-      tp.baseType(EmbeddedControls_Struct) != NoType
+      tp.baseType(EmbeddedControls_Struct) != NoType &&
+      !tp.typeSymbol.isCaseClass
       //  && tp.typeSymbol.info.isInstanceOf[ClassInfoType] // TODO: ??
     }
 
