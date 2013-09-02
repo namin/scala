@@ -1328,7 +1328,13 @@ trait Implicits extends SourceContextUtils {
               val names: List[String] = entries map { _.name.toString }
               val namesTrees: List[Tree] = names map { name => Literal(Constant(name)) }
               val namesTree: Tree = Apply(Select(gen.mkAttributedRef(ListModule), nme.apply), namesTrees)
-              val maniTrees: List[Tree] = entries map { sym => findManifest(sym.tpe) }
+              val maniTrees: List[Tree] = entries map { sym =>
+                val tp = sym.tpe match {
+                  case NullaryMethodType(tp) => tp
+                  case tp => tp
+                }
+                findManifest(tp)
+              }
               val maniTree: Tree = Apply(Select(gen.mkAttributedRef(ListModule), nme.apply), maniTrees)
               manifestFactoryCall("refinedType", tp, findManifest(parents.head), namesTree, maniTree)
             }
