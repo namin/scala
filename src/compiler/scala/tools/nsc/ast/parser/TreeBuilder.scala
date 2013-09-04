@@ -376,7 +376,7 @@ abstract class TreeBuilder {
 
     /** Create tree representing a variable initializer */
     def makeNewVar(expr: Tree): Tree =
-      Apply(Ident(nme._newVar), List(expr))
+      Apply(Ident(nme._newVar) setPos expr.pos.makeTransparent, List(expr)) setPos expr.pos
 
     /** Create tree representing a return statement */
     def makeReturn(expr: Tree): Tree =
