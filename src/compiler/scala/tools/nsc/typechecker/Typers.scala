@@ -4883,7 +4883,7 @@ trait Typers extends Modes with Adaptations with Tags {
 
           } else {
             // no declared methods but have external ones
-            silent(_.typed(atPos(fun.pos)(Apply(Ident(extname).setPos(fun.pos), qual1::args)), mode, pt), false, tree) match { // ambiguity is an error
+            silent(_.typed(Apply(Ident(extname).setPos(fun.pos.makeTransparent), qual1::args).setPos(tree.pos), mode, pt), false, tree) match { // ambiguity is an error
               case SilentResultValue(res) =>
                 // picked external method
                 //println("picked external method: " + res)
