@@ -1,6 +1,11 @@
 Scala-Virtualized
 =================
 
+Diff
+----
+
+* [Compare with scala v2.10.2](https://github.com/namin/scala/compare/scala:v2.10.2...topic-virt-migration)
+
 Tests
 -----
 
