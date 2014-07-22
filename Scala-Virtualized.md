@@ -6,6 +6,12 @@ Diff
 
 * [Compare with scala v2.10.2](https://github.com/namin/scala/compare/scala:v2.10.2...topic-virt-migration)
 
+Features
+--------
+
+* HOSC paper [(PDF)](http://lampwww.epfl.ch/~amin/pub/hosc2013.pdf)
+* [tutorial repo](https://github.com/adriaanm/scala-virtualized-tutorial)
+
 Tests
 -----
 
