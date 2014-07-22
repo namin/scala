@@ -9,7 +9,7 @@ Diff
 Features
 --------
 
-* HOSC paper [(PDF)](http://lampwww.epfl.ch/~amin/pub/hosc2013.pdf)
+* HOSC paper ([PDF](http://lampwww.epfl.ch/~amin/pub/hosc2013.pdf))
 * [tutorial repo](https://github.com/adriaanm/scala-virtualized-tutorial)
 
 Tests
