@@ -225,7 +225,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
      *    1.8.1  M's type is a subtype of O's type, or
      *    1.8.2  M is of type []S, O is of type ()T and S <: T, or
      *    1.8.3  M is of type ()S, O is of type []T and S <: T, or
-     *    1.9.  If M is a macro def, O cannot be deferred.
+     *    1.9.  If M is a macro def, O cannot be deferred unless there's a concrete method overriding O.
      *    1.10. If M is not a macro def, O cannot be a macro def.
      *  2. Check that only abstract classes have deferred members
      *  3. Check that concrete classes do not have deferred definitions
@@ -383,7 +383,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
             overrideError("cannot be used here - classes can only override abstract types");
           } else if (other.isEffectivelyFinal) { // (1.2)
             overrideError("cannot override final member");
-          } else if (!other.isDeferred && !other.hasFlag(DEFAULTMETHOD) && !member.isAnyOverride && !member.isSynthetic) { // (*)
+          } else if (!other.isDeferredOrDefault && !member.isAnyOverride && !member.isSynthetic) { // (*)
             // (*) Synthetic exclusion for (at least) default getters, fixes SI-5178. We cannot assign the OVERRIDE flag to
             // the default getter: one default getter might sometimes override, sometimes not. Example in comment on ticket.
               if (isNeitherInClass && !(other.owner isSubClass member.owner))
@@ -417,7 +417,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           } else if (other.isValue && other.isLazy && !other.isSourceMethod && !other.isDeferred &&
                      member.isValue && !member.isLazy) {
             overrideError("must be declared lazy to override a concrete lazy value")
-          } else if (other.isDeferred && member.isTermMacro) { // (1.9)
+          } else if (other.isDeferred && member.isTermMacro && member.extendedOverriddenSymbols.forall(_.isDeferred)) { // (1.9)
             overrideError("cannot override an abstract method")
           } else if (other.isTermMacro && !member.isTermMacro) { // (1.10)
             overrideError("cannot override a macro")
@@ -565,7 +565,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         def checkNoAbstractMembers(): Unit = {
           // Avoid spurious duplicates: first gather any missing members.
           def memberList = clazz.info.nonPrivateMembersAdmitting(VBRIDGE)
-          val (missing, rest) = memberList partition (m => m.isDeferred && !ignoreDeferred(m))
+          val (missing, rest) = memberList partition (m => m.isDeferredNotDefault && !ignoreDeferred(m))
           // Group missing members by the name of the underlying symbol,
           // to consolidate getters and setters.
           val grouped = missing groupBy (sym => analyzer.underlyingSymbol(sym).name)
@@ -909,11 +909,13 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           // case DeBruijnIndex(_, _) =>
           case SingleType(pre, sym) =>
             validateVariance(pre, variance)
+          case TypeRef(_, sym, _) if sym.isAliasType =>
+            // okay to ignore pre/args here. In 2.10.3 we used to check them in addition to checking
+            // the normalized type, which led to exponential time type checking, see pos/t8152-performance.scala
+            validateVariance(tp.normalize, variance)
           case TypeRef(pre, sym, args) =>
 //            println("validate "+sym+" at "+relativeVariance(sym))
-            if (sym.isAliasType/* && relativeVariance(sym) == AnyVariance*/)
-              validateVariance(tp.normalize, variance)
-            else if (sym.variance != NoVariance) {
+            if (sym.variance != NoVariance) {
               val v = relativeVariance(sym)
               if (v != AnyVariance && sym.variance != v * variance) {
                 //Console.println("relativeVariance(" + base + "," + sym + ") = " + v);//DEBUG
@@ -1513,17 +1515,39 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         false
     }
 
-    private def checkTypeRef(tp: Type, tree: Tree) = tp match {
+    private def checkTypeRef(tp: Type, tree: Tree, skipBounds: Boolean) = tp match {
       case TypeRef(pre, sym, args) =>
-        checkDeprecated(sym, tree.pos)
+        tree match {
+          case tt: TypeTree if tt.original == null => // SI-7783 don't warn about inferred types
+          case _ =>
+            checkDeprecated(sym, tree.pos)
+        }
         if(sym.isJavaDefined)
           sym.typeParams foreach (_.cookJavaRawInfo())
-        if (!tp.isHigherKinded)
+        if (!tp.isHigherKinded && !skipBounds)
           checkBounds(tree, pre, sym.owner, sym.typeParams, args)
       case _ =>
     }
 
-    private def checkAnnotations(tpes: List[Type], tree: Tree) = tpes foreach (tp => checkTypeRef(tp, tree))
+    private def checkTypeRefBounds(tp: Type, tree: Tree) = {
+      var skipBounds = false
+      tp match {
+        case AnnotatedType(ann :: Nil, underlying, selfSym) if ann.symbol == UncheckedBoundsClass =>
+          skipBounds = true
+          underlying
+        case TypeRef(pre, sym, args) =>
+          if (!tp.isHigherKinded && !skipBounds)
+            checkBounds(tree, pre, sym.owner, sym.typeParams, args)
+          tp
+        case _ =>
+          tp
+      }
+    }
+
+    private def checkAnnotations(tpes: List[Type], tree: Tree) = tpes foreach { tp =>
+      checkTypeRef(tp, tree, skipBounds = false)
+      checkTypeRefBounds(tp, tree)
+    }
     private def doTypeTraversal(tree: Tree)(f: Type => Unit) = if (!inPattern) tree.tpe foreach f
 
     private def applyRefchecksToAnnotations(tree: Tree): Unit = {
@@ -1551,8 +1575,9 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           }
 
           doTypeTraversal(tree) {
-            case AnnotatedType(annots, _, _)  => applyChecks(annots)
-            case _ =>
+            case tp @ AnnotatedType(annots, _, _)  =>
+              applyChecks(annots)
+            case tp =>
           }
         case _ =>
       }
@@ -1735,13 +1760,27 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
             }
 
             val existentialParams = new ListBuffer[Symbol]
-            doTypeTraversal(tree) { // check all bounds, except those that are existential type parameters
-              case ExistentialType(tparams, tpe) =>
+            var skipBounds = false
+            // check all bounds, except those that are existential type parameters
+            // or those within typed annotated with @uncheckedBounds
+            doTypeTraversal(tree) {
+              case tp @ ExistentialType(tparams, tpe) =>
                 existentialParams ++= tparams
-              case t: TypeRef =>
-                checkTypeRef(deriveTypeWithWildcards(existentialParams.toList)(t), tree)
+              case ann: AnnotatedType if ann.hasAnnotation(UncheckedBoundsClass) =>
+                // SI-7694 Allow code synthetizers to disable checking of bounds for TypeTrees based on inferred LUBs
+                // which might not conform to the constraints.
+                skipBounds = true
+              case tp: TypeRef =>
+                val tpWithWildcards = deriveTypeWithWildcards(existentialParams.toList)(tp)
+                checkTypeRef(tpWithWildcards, tree, skipBounds)
               case _ =>
             }
+            if (skipBounds) {
+              tree.tpe = tree.tpe.map {
+                _.filterAnnotations(_.symbol != UncheckedBoundsClass)
+              }
+            }
+
             tree
 
           case TypeApply(fn, args) =>
@@ -1793,9 +1832,11 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           case LabelDef(_, _, _) if treeInfo.hasSynthCaseSymbol(result) =>
             val old = inPattern
             inPattern = true
-            val res = deriveLabelDef(result)(transform)
+            val res = deriveLabelDef(result)(transform) // TODO SI-7756 Too broad! The code from the original case body should be fully refchecked!
             inPattern = old
             res
+          case ValDef(_, _, _, _) if treeInfo.hasSynthCaseSymbol(result) =>
+            deriveValDef(result)(transform) // SI-7716 Don't refcheck the tpt of the synthetic val that holds the selector.
           case _ =>
             super.transform(result)
         }

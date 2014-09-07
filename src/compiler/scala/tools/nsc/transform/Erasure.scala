@@ -341,11 +341,6 @@ abstract class Erasure extends AddInterfaces
     }
   }
   
-  // Each primitive value class has its own getClass for ultra-precise class object typing.
-  private lazy val primitiveGetClassMethods = Set[Symbol](Any_getClass, AnyVal_getClass) ++ (
-    ScalaValueClasses map (_.tpe member nme.getClass_)
-  )
-  
   // ## requires a little translation
   private lazy val poundPoundMethods = Set[Symbol](Any_##, Object_##)
   
@@ -900,6 +895,9 @@ abstract class Erasure extends AddInterfaces
      *    but their erased types are the same.
      */
     private def checkNoDoubleDefs(root: Symbol) {
+      def sameTypeAfterErasure(sym1: Symbol, sym2: Symbol) =
+        afterPostErasure(sym1.info =:= sym2.info) && !sym1.isMacro && !sym2.isMacro
+
       def doubleDefError(sym1: Symbol, sym2: Symbol) {
         // the .toString must also be computed at the earlier phase
         val tpe1 = afterRefchecks(root.thisType.memberType(sym1))
@@ -920,12 +918,25 @@ abstract class Erasure extends AddInterfaces
       }
 
       val decls = root.info.decls
+
+      // SI-8010 force infos, otherwise makeNotPrivate in ExplicitOuter info transformer can trigger
+      //         a scope rehash while were iterating and we can see the same entry twice!
+      //         Inspection of SymbolPairs (the basis of OverridingPairs), suggests that it is immune
+      //         from this sort of bug as it copies the symbols into a temporary scope *before* any calls to `.info`,
+      //         ie, no variant of it calls `info` or `tpe` in `SymbolPair#exclude`.
+      //
+      //         Why not just create a temporary scope here? We need to force the name changes in any case before
+      //         we do these checks, so that we're comparing same-named methods based on the expanded names that actually
+      //         end up in the bytecode.
+      afterPostErasure(decls.foreach(_.info))
+
       var e = decls.elems
       while (e ne null) {
         if (e.sym.isTerm) {
           var e1 = decls.lookupNextEntry(e)
           while (e1 ne null) {
-            if (afterPostErasure(e1.sym.info =:= e.sym.info)) doubleDefError(e.sym, e1.sym)
+            assert(e.sym ne e1.sym, s"Internal error: encountered ${e.sym.debugLocationString} twice during scope traversal. This might be related to SI-8010.")
+            if (sameTypeAfterErasure(e1.sym, e.sym)) doubleDefError(e.sym, e1.sym)
             e1 = decls.lookupNextEntry(e1)
           }
         }
@@ -944,7 +955,8 @@ abstract class Erasure extends AddInterfaces
       while (opc.hasNext) {
         if (!afterRefchecks(
               root.thisType.memberType(opc.overriding) matches
-              root.thisType.memberType(opc.overridden))) {
+              root.thisType.memberType(opc.overridden)) &&
+            sameTypeAfterErasure(opc.overriding, opc.overridden)) {
           debuglog("" + opc.overriding.locationString + " " +
                      opc.overriding.infosString +
                      opc.overridden.locationString + " " +

@@ -1172,6 +1172,14 @@ trait Types extends api.Types { self: SymbolTable =>
         continue = false
         val bcs0 = baseClasses
         var bcs = bcs0
+        // omit PRIVATE LOCALS unless selector class is contained in class owning the def.
+        def admitPrivateLocal(owner: Symbol): Boolean = {
+          val selectorClass = this match {
+            case tt: ThisType => tt.sym // SI-7507 the first base class is not necessarily the selector class.
+            case _            => bcs0.head
+          }
+          selectorClass.hasTransOwner(owner)
+        }
         while (!bcs.isEmpty) {
           val decls = bcs.head.info.decls
           var entry = decls.lookupEntry(name)
@@ -1181,10 +1189,10 @@ trait Types extends api.Types { self: SymbolTable =>
             if ((flags & required) == required) {
               val excl = flags & excluded
               if (excl == 0L &&
-                    (// omit PRIVATE LOCALS unless selector class is contained in class owning the def.
+                    (
                   (bcs eq bcs0) ||
                   (flags & PrivateLocal) != PrivateLocal ||
-                  (bcs0.head.hasTransOwner(bcs.head)))) {
+                  admitPrivateLocal(bcs.head))) {
                 if (name.isTypeName || stableOnly && sym.isStable) {
                   if (Statistics.canEnable) Statistics.popTimer(typeOpsStack, start)
                   if (suspension ne null) suspension foreach (_.suspended = false)
@@ -2618,7 +2626,7 @@ trait Types extends api.Types { self: SymbolTable =>
 
     private var isdepmeth: ThreeValue = UNKNOWN
     override def isDependentMethodType: Boolean = {
-      if (isdepmeth == UNKNOWN) isdepmeth = fromBoolean(IsDependentCollector.collect(resultType))
+      if (isdepmeth == UNKNOWN) isdepmeth = fromBoolean(IsDependentCollector.collect(resultType.dealias))
       toBoolean(isdepmeth)
     }
 
@@ -3927,13 +3935,13 @@ trait Types extends api.Types { self: SymbolTable =>
 // Hash consing --------------------------------------------------------------
 
   private val initialUniquesCapacity = 4096
-  private var uniques: util.HashSet[Type] = _
+  private var uniques: util.WeakHashSet[Type] = _
   private var uniqueRunId = NoRunId
 
   protected def unique[T <: Type](tp: T): T = {
     if (Statistics.canEnable) Statistics.incCounter(rawTypeCount)
     if (uniqueRunId != currentRunId) {
-      uniques = util.HashSet[Type]("uniques", initialUniquesCapacity)
+      uniques = util.WeakHashSet[Type](initialUniquesCapacity)
       perRunCaches.recordCache(uniques)
       uniqueRunId = currentRunId
     }
@@ -4799,7 +4807,7 @@ trait Types extends api.Types { self: SymbolTable =>
   object IsDependentCollector extends TypeCollector(false) {
     def traverse(tp: Type) {
       if (tp.isImmediatelyDependent) result = true
-      else if (!result) mapOver(tp)
+      else if (!result) mapOver(tp.dealias)
     }
   }
 
@@ -5222,30 +5230,15 @@ trait Types extends api.Types { self: SymbolTable =>
     }
   }
 
-  class SubTypePair(val tp1: Type, val tp2: Type) {
-    override def hashCode = tp1.hashCode * 41 + tp2.hashCode
-    override def equals(other: Any) = other match {
-      case stp: SubTypePair =>
-        // suspend TypeVars in types compared by =:=,
-        // since we don't want to mutate them simply to check whether a subtype test is pending
-        // in addition to making subtyping "more correct" for type vars,
-        // it should avoid the stackoverflow that's been plaguing us (https://groups.google.com/d/topic/scala-internals/2gHzNjtB4xA/discussion)
-        // this method is only called when subtyping hits a recursion threshold (subsametypeRecursions >= LogPendingSubTypesThreshold)
-        def suspend(tp: Type) =
-          if (tp.isGround) null else suspendTypeVarsInType(tp)
-        def revive(suspension: List[TypeVar]) =
-          if (suspension ne null) suspension foreach (_.suspended = false)
+  final case class SubTypePair(tp1: Type, tp2: Type) {
+    // SI-8146 we used to implement equality here in terms of pairwise =:=.
+    //         But, this was inconsistent with hashCode, which was based on the
+    //         Type#hashCode, based on the structure of types, not the meaning.
+    //         Now, we use `Type#{equals,hashCode}` as the (consistent) basis for
+    //         detecting cycles (aka keeping subtyping decidable.)
+    //
+    //         I added tests to show that we detect the cycle: neg/t8146-no-finitary*
 
-        val suspensions = Array(tp1, stp.tp1, tp2, stp.tp2) map suspend
-
-        val sameTypes = (tp1 =:= stp.tp1) && (tp2 =:= stp.tp2)
-
-        suspensions foreach revive
-
-        sameTypes
-      case _ =>
-        false
-    }
     override def toString = tp1+" <:<? "+tp2
   }
 
@@ -5811,7 +5804,7 @@ trait Types extends api.Types { self: SymbolTable =>
         if (subsametypeRecursions >= LogPendingSubTypesThreshold) {
           val p = new SubTypePair(tp1, tp2)
           if (pendingSubTypes(p))
-            false
+            false // see neg/t8146-no-finitary*
           else
             try {
               pendingSubTypes += p
@@ -7304,6 +7297,12 @@ trait Types extends api.Types { self: SymbolTable =>
     if (ps exists typeIsSubTypeOfSerializable) ps.toList
     else (ps :+ SerializableClass.tpe).toList
   )
+
+  /** Adds the @uncheckedBound annotation if the given `tp` has type arguments */
+  final def uncheckedBounds(tp: Type): Type = {
+    if (tp.typeArgs.isEmpty || UncheckedBoundsClass == NoSymbol) tp // second condition for backwards compatibilty with older scala-reflect.jar
+    else tp.withAnnotation(AnnotationInfo marker UncheckedBoundsClass.tpe)
+  }
 
   /** Members of the given class, other than those inherited
    *  from Any or AnyRef.

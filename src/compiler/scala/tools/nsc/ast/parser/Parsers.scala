@@ -980,8 +980,11 @@ self =>
 
     /** Assumed (provisionally) to be TermNames. */
     def ident(skipIt: Boolean): Name =
-      if (isIdent) rawIdent().encode
-      else {
+      if (isIdent) {
+        val name = in.name.encode
+        in.nextToken()
+        name
+      } else {
         syntaxErrorOrIncomplete(expectedMsg(IDENTIFIER), skipIt)
         nme.ERROR
       }
@@ -1474,8 +1477,9 @@ self =>
      *  }}}
      */
     def postfixExpr(): Tree = {
-      val base = opstack
-      var top = prefixExpr()
+      val start = in.offset
+      val base  = opstack
+      var top   = prefixExpr()
 
       while (isIdent) {
         top = reduceStack(isExpr = true, base, top, precedence(in.name), leftAssoc = treeInfo.isLeftAssoc(in.name))
@@ -1493,9 +1497,7 @@ self =>
           val topinfo = opstack.head
           opstack = opstack.tail
           val od = stripParens(reduceStack(isExpr = true, base, topinfo.operand, 0, leftAssoc = true))
-          return atPos(od.pos.startOrPoint, topinfo.offset) {
-            new PostfixSelect(od, topinfo.operator.encode)
-          }
+          return makePostfixSelect(start, topinfo.offset, od, topinfo.operator)
         }
       }
       reduceStack(isExpr = true, base, top, 0, leftAssoc = true)
@@ -2775,6 +2777,8 @@ self =>
               List(copyValDef(vdef)(mods = mods | Flags.PRESUPER))
             case tdef @ TypeDef(mods, name, tparams, rhs) =>
               List(treeCopy.TypeDef(tdef, mods | Flags.PRESUPER, name, tparams, rhs))
+            case docdef @ DocDef(comm, rhs) =>
+              List(treeCopy.DocDef(docdef, comm, rhs))
             case stat if !stat.isEmpty =>
               syntaxError(stat.pos, "only type definitions and concrete field definitions allowed in early object initialization section", false)
               List()
@@ -3070,7 +3074,7 @@ self =>
       while (!isStatSeqEnd && in.token != CASE) {
         if (in.token == IMPORT) {
           stats ++= importClause()
-          acceptStatSep()
+          acceptStatSepOpt()
         }
         else if (isExprIntro) {
           stats += statement(InBlock)

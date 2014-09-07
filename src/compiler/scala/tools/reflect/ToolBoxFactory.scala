@@ -8,12 +8,15 @@ import scala.tools.nsc.typechecker.Modes
 import scala.tools.nsc.io.VirtualDirectory
 import scala.tools.nsc.interpreter.AbstractFileClassLoader
 import scala.tools.nsc.util.FreshNameCreator
+import scala.tools.nsc.ast.parser.Tokens.EOF
 import scala.reflect.internal.Flags._
 import scala.reflect.internal.util.{BatchSourceFile, NoSourceFile, NoFile}
 import java.lang.{Class => jClass}
 import scala.compat.Platform.EOL
 import scala.reflect.NameTransformer
 import scala.reflect.api.JavaUniverse
+import scala.reflect.io.NoAbstractFile
+import scala.tools.nsc.interactive.RangePositions
 
 abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
 
@@ -137,7 +140,9 @@ abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
         val wrapper2      = if (!withMacrosDisabled) (currentTyper.context.withMacrosEnabled[Tree] _) else (currentTyper.context.withMacrosDisabled[Tree] _)
         def wrapper       (tree: => Tree) = wrapper1(wrapper2(tree))
 
-        phase = (new Run).typerPhase // need to set a phase to something <= typerPhase, otherwise implicits in typedSelect will be disabled
+        val run = new Run
+        run.symSource(ownerClass) = NoAbstractFile // need to set file to something different from null, so that currentRun.defines works
+        phase = run.typerPhase // need to set a phase to something <= typerPhase, otherwise implicits in typedSelect will be disabled
         currentTyper.context.setReportErrors() // need to manually set context mode, otherwise typer.silent will throw exceptions
         reporter.reset()
 
@@ -166,7 +171,7 @@ abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
         transformDuringTyper(expr, withImplicitViewsDisabled = withImplicitViewsDisabled, withMacrosDisabled = withMacrosDisabled)(
           (currentTyper, expr) => {
             trace("typing (implicit views = %s, macros = %s): ".format(!withImplicitViewsDisabled, !withMacrosDisabled))(showAttributed(expr, true, true, settings.Yshowsymkinds.value))
-            currentTyper.silent(_.typed(expr, analyzer.EXPRmode, pt)) match {
+            currentTyper.silent(_.typed(expr, analyzer.EXPRmode, pt), reportAmbiguousErrors = false) match {
               case analyzer.SilentResultValue(result) =>
                 trace("success: ")(showAttributed(result, true, true, settings.Yshowsymkinds.value))
                 result
@@ -273,14 +278,13 @@ abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
       def parse(code: String): Tree = {
         val run = new Run
         reporter.reset()
-        val wrappedCode = "object wrapper {" + EOL + code + EOL + "}"
-        val file = new BatchSourceFile("<toolbox>", wrappedCode)
+        val file = new BatchSourceFile("<toolbox>", code)
         val unit = new CompilationUnit(file)
         phase = run.parserPhase
         val parser = new syntaxAnalyzer.UnitParser(unit)
-        val wrappedTree = parser.parse()
+        val parsed = parser.templateStats()
+        parser.accept(EOF)
         throwIfErrors()
-        val PackageDef(_, List(ModuleDef(_, _, Template(_, _, _ :: parsed)))) = wrappedTree
         parsed match {
           case expr :: Nil => expr
           case stats :+ expr => Block(stats, expr)
@@ -326,8 +330,12 @@ abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
       try {
         val errorFn: String => Unit = msg => frontEnd.log(scala.reflect.internal.util.NoPosition, msg, frontEnd.ERROR)
         val command = new CompilerCommand(arguments.toList, errorFn)
-        command.settings.outputDirs setSingleOutput virtualDirectory
-        val instance = new ToolBoxGlobal(command.settings, frontEndToReporter(frontEnd, command.settings))
+        val settings = command.settings
+        settings.outputDirs setSingleOutput virtualDirectory
+        val reporter = frontEndToReporter(frontEnd, command.settings)
+        val instance =
+          if (settings.Yrangepos.value) new ToolBoxGlobal(settings, reporter) with RangePositions
+          else new ToolBoxGlobal(settings, reporter)
         if (frontEnd.hasErrors) {
           var msg = "reflective compilation has failed: cannot initialize the compiler: " + EOL + EOL
           msg += frontEnd.infos map (_.msg) mkString EOL
@@ -402,7 +410,7 @@ abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
 
     def compile(tree: u.Tree): () => Any = {
       if (compiler.settings.verbose.value) println("importing "+tree)
-      var ctree: compiler.Tree = importer.importTree(tree)
+      val ctree: compiler.Tree = importer.importTree(tree)
 
       if (compiler.settings.verbose.value) println("compiling "+ctree)
       compiler.compile(ctree)

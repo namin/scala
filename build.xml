@@ -137,12 +137,16 @@ TODO:
   <property name="build-quick.dir"         value="${build.dir}/quick"/>
   <property name="build-pack.dir"          value="${build.dir}/pack"/>
   <property name="build-osgi.dir"          value="${build.dir}/osgi"/>
+  <property name="build-junit.dir"         value="${build.dir}/junit"/>
   <property name="build-strap.dir"         value="${build.dir}/strap"/>
   <property name="build-docs.dir"          value="${build.dir}/scaladoc"/>
   <property name="build-sbt.dir"           value="${build.dir}/sbt-interface"/>
 
   <property name="test.osgi.src"           value="${partest.dir}/osgi/src"/>
   <property name="test.osgi.classes"       value="${build-osgi.dir}/classes"/>
+
+  <property name="test.junit.src"          value="${partest.dir}/junit"/>
+  <property name="test.junit.classes"      value="${build-junit.dir}/classes"/>
 
   <property name="dists.dir"               value="${basedir}/dists"/>
 
@@ -208,19 +212,28 @@ TODO:
         <dependency groupId="biz.aQute" artifactId="bnd" version="1.50.0"/>
       </artifact:dependencies>
 
+      <!-- JUnit -->
+      <property name="junit.version" value="4.10"/>
+      <artifact:dependencies pathId="junit.classpath" filesetId="junit.fileset">
+        <dependency groupId="junit" artifactId="junit" version="${junit.version}"/>
+      </artifact:dependencies>
+
       <!-- Pax runner -->
-      <property name="pax.exam.version" value="2.5.0"/>
+      <property name="pax.exam.version" value="2.6.0"/>
       <artifact:dependencies pathId="pax.exam.classpath" filesetId="pax.exam.fileset">
         <dependency groupId="org.ops4j.pax.exam" artifactId="pax-exam-container-native" version="${pax.exam.version}"/>
         <dependency groupId="org.ops4j.pax.exam" artifactId="pax-exam-junit4" version="${pax.exam.version}"/>
         <dependency groupId="org.ops4j.pax.exam" artifactId="pax-exam-link-assembly" version="${pax.exam.version}"/>
-        <dependency groupId="org.ops4j.pax.url" artifactId="pax-url-aether" version="1.4.0"/>
+        <!-- upgraded to 1.6.0 to get fix for https://ops4j1.jira.com/browse/PAXURL-217
+      https://ops4j1.jira.com/browse/PAXURL-138 is still unresolved... -->
+        <dependency groupId="org.ops4j.pax.url" artifactId="pax-url-aether" version="1.6.0"/>
         <dependency groupId="org.ops4j.pax.swissbox" artifactId="pax-swissbox-framework" version="1.5.1"/>
         <dependency groupId="ch.qos.logback" artifactId="logback-core" version="0.9.20"/>
         <dependency groupId="ch.qos.logback" artifactId="logback-classic" version="0.9.20"/>
-        <dependency groupId="junit" artifactId="junit" version="4.10"/>
+        <dependency groupId="junit" artifactId="junit" version="${junit.version}"/>
         <dependency groupId="org.apache.felix" artifactId="org.apache.felix.framework" version="3.2.2"/>
       </artifact:dependencies>
+
 
       <artifact:dependencies pathId="partest.extras.classpath" filesetId="partest.extras.fileset" versionsId="partest.extras.versions">
         <dependency groupId="com.googlecode.java-diff-utils" artifactId="diffutils" version="1.3.0"/>
@@ -229,12 +242,15 @@ TODO:
       <!-- BND support -->
       <typedef resource="aQute/bnd/ant/taskdef.properties" classpathref="extra.tasks.classpath" />
 
+      <artifact:remoteRepository id="extra-repo" url="${extra.repo.url}"/>
+
       <!-- Download STARR via maven if `starr.use.released` is set,
            and `starr.version` is specified (see the starr.number properties file).
            Want to slow down STARR changes, using only released versions. -->
       <if><isset property="starr.use.released"/><then>
         <echo message="Using Scala ${starr.version} for STARR."/>
         <artifact:dependencies pathId="starr.core.path">
+          <artifact:remoteRepository refid="extra-repo"/>
           <dependency groupId="org.scala-lang" artifactId="scala-library" version="${starr.version}"/>
           <dependency groupId="org.scala-lang" artifactId="scala-reflect" version="${starr.version}"/>
           <dependency groupId="org.scala-lang" artifactId="scala-compiler" version="${starr.version}"/>
@@ -353,9 +369,9 @@ TODO:
     <property name="sbt.lib.dir"           value="${build-sbt.dir}/${sbt.latest.version}/lib"/>
 
     <property name="sbt.interface.jar"     value="${sbt.lib.dir}/interface.jar"/>
-    <property name="sbt.interface.url"     value="http://typesafe.artifactoryonline.com/typesafe/ivy-releases/org.scala-sbt/interface/${sbt.latest.version}/jars/interface.jar"/>
+    <property name="sbt.interface.url"     value="http://private-repo.typesafe.com/typesafe/ivy-releases/org.scala-sbt/interface/${sbt.latest.version}/jars/interface.jar"/>
     <property name="sbt.interface.src.jar" value="${sbt.src.dir}/compiler-interface-src.jar"/>
-    <property name="sbt.interface.src.url" value="http://typesafe.artifactoryonline.com/typesafe/ivy-releases/org.scala-sbt/compiler-interface/${sbt.latest.version}/jars/compiler-interface-src.jar"/>
+    <property name="sbt.interface.src.url" value="http://private-repo.typesafe.com/typesafe/ivy-releases/org.scala-sbt/compiler-interface/${sbt.latest.version}/jars/compiler-interface-src.jar"/>
 
 
     <!-- Additional command line arguments for scalac. They are added to all build targets -->
@@ -404,6 +420,17 @@ TODO:
     <echo message="    maven version: ${maven.version.number}"/>
     <echo message="     OSGi version: ${osgi.version.number}" />
     <echo message="canonical version: ${version.number}" />
+
+    <echoproperties destfile="buildcharacter.properties">
+      <propertyset>
+        <propertyref regex="time.*" />
+        <propertyref regex="git.*" />
+        <propertyref name="java.vm.name" />
+        <propertyref regex=".*version.*" />
+        <propertyref regex="scalac.args.*" />
+        <propertyref name="scalacfork.jvmargs" />
+      </propertyset>
+    </echoproperties>
 
     <!-- validate version suffixes -->
     <if><equals arg1="${maven.version.suffix}" arg2="-SNAPSHOT"/><then>
@@ -678,6 +705,12 @@ TODO:
       <path refid="pack.compiler.path"/>
       <fileset dir="${partest.dir}/files/lib" includes="*.jar" />
       <pathelement location="${pack.dir}/lib/scala-swing.jar"/> <!-- TODO - segregate swing tests (there can't be many) -->
+    </path>
+
+    <path id="test.junit.compiler.build.path">
+      <pathelement location="${test.junit.classes}"/>
+      <path refid="quick.compiler.build.path"/>
+      <path refid="junit.classpath"/>
     </path>
 
     <path id="test.osgi.compiler.build.path">
@@ -1223,9 +1256,11 @@ TODO:
           <attribute name="Class-Path" value="scala-reflect.jar scala-library.jar"/>
         </manifest>
       </pre>
+      <!-- script api is 2.11-only so far
       <jar-opts>
         <service type="javax.script.ScriptEngineFactory" provider="scala.tools.nsc.interpreter.IMain$Factory"/>
       </jar-opts>
+      -->
     </staged-pack>
   </target>
 
@@ -1445,6 +1480,45 @@ TODO:
     <stopwatch name="quick.sbt-interface.timer" action="total"/>
   </target>
 
+  <target name="test.junit.init" depends="quick.done">
+    <uptodate property="test.junit.available" targetfile="${build-junit.dir}/test-compile.complete">
+      <srcfiles dir="${test.junit.src}">
+        <include name="**/*.scala"/>
+      </srcfiles>
+    </uptodate>
+  </target>
+
+  <target name="test.junit.comp" depends="test.junit.init, quick.done" unless="test.junit.available">
+    <stopwatch name="test.junit.compiler.timer"/>
+    <mkdir dir="${test.junit.classes}"/>
+    <scalacfork
+      destdir="${test.junit.classes}"
+      compilerpathref="quick.compiler.path"
+      params="${scalac.args.quick}"
+      srcdir="${test.junit.src}"
+      jvmargs="${scalacfork.jvmargs}">
+      <include name="**/*.scala"/>
+      <compilationpath refid="test.junit.compiler.build.path"/>
+    </scalacfork>
+    <touch file="${build-junit.dir}/test-compile.complete" verbose="no"/>
+    <stopwatch name="test.junit.compiler.timer" action="total"/>
+  </target>
+
+  <target name="test.junit" depends="test.junit.comp">
+    <stopwatch name="test.junit.timer"/>
+    <mkdir dir="${test.junit.classes}"/>
+    <junit fork="yes" haltonfailure="yes" showoutput="yes" printsummary="on">
+      <classpath refid="test.junit.compiler.build.path"/>
+      <batchtest fork="yes" todir="${build-junit.dir}">
+        <fileset dir="${test.junit.classes}">
+          <include name="**/*Test.class"/>
+        </fileset>
+      </batchtest>
+      <formatter type="plain"/>
+    </junit>
+    <stopwatch name="test.junit.timer" action="total"/>
+  </target>
+
   <property name="partest.srcdir" value="files" /> <!-- TODO: make targets for `pending` and other subdirs -->
 
   <target name="test.run" depends="pack.done">
@@ -1516,7 +1590,7 @@ TODO:
 
   <!-- for use in PR validation, where stability is rarely broken, so we're going to use starr for locker,
        and skip test.stability (which requires locker == quick) -->
-  <target name="test.core" depends="test.osgi, test.sbt, test.bc, test.interactive, test.continuations.suite, test.scaladoc, test.suite"/>
+  <target name="test.core" depends="test.osgi, test.sbt, test.bc, test.junit, test.interactive, test.continuations.suite, test.scaladoc, test.suite"/>
   <target name="test.done" depends="test.core, test.stability"/>
 
 
@@ -1531,7 +1605,7 @@ TODO:
     <mkdir dir="${bc-build.dir}"/>
     <!-- Pull down MIMA -->
     <artifact:dependencies pathId="mima.classpath">
-      <dependency groupId="com.typesafe" artifactId="mima-reporter_2.9.2" version="0.1.5"/>
+      <dependency groupId="com.typesafe" artifactId="mima-reporter_2.10" version="0.1.6"/>
     </artifact:dependencies>
     <artifact:dependencies pathId="old.bc.classpath">
       <dependency groupId="org.scala-lang" artifactId="scala-swing" version="${bc-reference-version}"/>
@@ -1763,16 +1837,9 @@ TODO:
     <copy toDir="${dist.dir}/lib">
       <fileset dir="${build-pack.dir}/lib">
         <include name="jline.jar"/>
-        <include name="scalacheck.jar"/>
-        <include name="scala-partest.jar"/>
+        <include name="scala-partest.jar"/> <!-- needed for maven publish -->
         <include name="scalap.jar"/>
       </fileset>
-    </copy>
-
-    <copy todir="${dist.dir}/lib">
-      <resources refid="partest.extras.fileset"/>
-      <mapper classpathref="maven-ant-tasks.classpath" classname="org.apache.maven.artifact.ant.VersionMapper"
-              from="${partest.extras.versions}" to="flatten"/>
     </copy>
 
     <mkdir dir="${dist.dir}/bin"/>
@@ -1795,26 +1862,26 @@ TODO:
   </target>
 
   <target name="dist.doc" depends="dist.base, docs.done">
-    <mkdir dir="${dist.dir}/doc/scala-devel-docs"/>
+    <mkdir dir="${dist.dir}/doc"/>
+    <mkdir dir="${dist.dir}/doc/licenses"/>
+    <mkdir dir="${dist.dir}/doc/tools"/>
     <copy file="${docs.dir}/LICENSE" toDir="${dist.dir}/doc"/>
-    <copy file="${docs.dir}/README" toDir="${dist.dir}/doc"/>
-    <mkdir dir="${dist.dir}/doc/scala-devel-docs/api"/>
-    <copy toDir="${dist.dir}/doc/scala-devel-docs/api">
-      <fileset dir="${build-docs.dir}/library"/>
+    <copy file="${docs.dir}/README"  toDir="${dist.dir}/doc"/>
+    <copy                            toDir="${dist.dir}/doc/licenses">
+      <fileset dir="${docs.dir}/licenses"/>
     </copy>
-    <mkdir dir="${dist.dir}/doc/scala-devel-docs/examples"/>
-    <copy toDir="${dist.dir}/doc/scala-devel-docs/examples">
-      <fileset dir="${docs.dir}/examples">
-        <exclude name="**/*.desired.sha1"/>
-      </fileset>
-    </copy>
-    <mkdir dir="${dist.dir}/doc/scala-devel-docs/tools"/>
-    <copy toDir="${dist.dir}/doc/scala-devel-docs/tools">
+    <copy                            toDir="${dist.dir}/doc/tools">
       <fileset dir="${build-docs.dir}/manual/html"/>
     </copy>
+
+    <mkdir dir="${dist.dir}/api"/>
+    <copy toDir="${dist.dir}/api">
+      <fileset dir="${build-docs.dir}/library"/>
+    </copy>
     <copy file="${src.dir}/swing/doc/README"
-          toFile="${dist.dir}/doc/scala-devel-docs/README.scala-swing"/>
+          toFile="${dist.dir}/api/README.scala-swing"/>
   </target>
+
 
   <target name="dist.man" depends="dist.base">
     <mkdir dir="${dist.dir}/man"/>
@@ -1823,18 +1890,60 @@ TODO:
     </copy>
   </target>
 
+  <!--
+       A jar-like task that creates an OSGi source bundle. It adds the required MANIFEST.MF headers that allow
+       Eclipse to match sources with the corresponding binaries.
+  -->
+  <macrodef name="osgi.source.bundle">
+    <attribute name="destfile"     description="The jar file name"/>
+    <attribute name="symbolicName" description="The original bundle symbolic name (without .source at the end)"/>
+    <attribute name="bundleName"   description="A value for Bundle-Name, usually a textual description"/>
+    <element   name="file-sets"    description="A sequence of fileset elements to be included in the jar" optional="true" implicit="true"/>
+
+    <sequential>
+      <jar whenmanifestonly="fail" destfile="@{destFile}">
+        <file-sets/>
+        <manifest>
+          <attribute name="Manifest-Version" value="1.0"/>
+          <attribute name="Bundle-Name" value="@{bundleName}"/>
+          <attribute name="Bundle-SymbolicName" value="@{symbolicName}.source"/>
+          <attribute name="Bundle-Version" value="${osgi.version.number}"/>
+          <attribute name="Eclipse-SourceBundle" value="@{symbolicName};version=&quot;${osgi.version.number}&quot;;roots:=&quot;.&quot;" />
+        </manifest>
+      </jar>
+    </sequential>
+  </macrodef>
+
   <target name="dist.src" depends="dist.base">
     <mkdir dir="${dist.dir}/src"/>
-    <jar whenmanifestonly="fail" destfile="${dist.dir}/src/scala-library-src.jar">
+    <osgi.source.bundle destfile="${dist.dir}/src/scala-library-src.jar"
+                        symbolicName="org.scala-lang.scala-library"
+                        bundleName="Scala Library Sources">
       <fileset dir="${src.dir}/library"/>
       <fileset dir="${src.dir}/continuations/library"/>
-    </jar>
-    <jar whenmanifestonly="fail" destfile="${dist.dir}/src/scala-reflect-src.jar"  basedir="${src.dir}/reflect"/>
-    <jar whenmanifestonly="fail" destfile="${dist.dir}/src/scala-swing-src.jar"    basedir="${src.dir}/swing"/>
-    <jar whenmanifestonly="fail" destfile="${dist.dir}/src/scala-compiler-src.jar" basedir="${src.dir}/compiler"/>
+    </osgi.source.bundle>
+    <osgi.source.bundle destfile="${dist.dir}/src/scala-reflect-src.jar"
+                        symbolicName="org.scala-lang.scala-reflect"
+                        bundleName="Scala Reflect Sources">
+      <fileset dir="${src.dir}/reflect"/>
+    </osgi.source.bundle>
+    <osgi.source.bundle destfile="${dist.dir}/src/scala-swing-src.jar"
+                        symbolicName="org.scala-lang.scala-swing"
+                        bundleName="Scala Swing Sources">
+      <fileset dir="${src.dir}/swing"/>
+    </osgi.source.bundle>
+    <osgi.source.bundle destfile="${dist.dir}/src/scala-compiler-src.jar"
+                        symbolicName="org.scala-lang.scala-compiler"
+                        bundleName="Scala Compiler Sources">
+      <fileset dir="${src.dir}/compiler"/>
+    </osgi.source.bundle>
     <jar whenmanifestonly="fail" destfile="${dist.dir}/src/fjbg-src.jar"           basedir="${src.dir}/fjbg"/>
     <jar whenmanifestonly="fail" destfile="${dist.dir}/src/msil-src.jar"           basedir="${src.dir}/msil"/>
-    <jar whenmanifestonly="fail" destfile="${dist.dir}/src/scala-actors-src.jar"   basedir="${src.dir}/actors"/>
+    <osgi.source.bundle destfile="${dist.dir}/src/scala-actors-src.jar"
+                        symbolicName="org.scala-lang.scala-actors"
+                        bundleName="Scala Actors Sources">
+      <fileset dir="${src.dir}/actors"/>
+    </osgi.source.bundle>
     <jar whenmanifestonly="fail" destfile="${dist.dir}/src/scalap-src.jar"         basedir="${src.dir}/scalap"/>
     <jar whenmanifestonly="fail" destfile="${dist.dir}/src/scala-partest-src.jar"  basedir="${src.dir}/partest"/>
   </target>

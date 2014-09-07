@@ -19,7 +19,7 @@ import scala.collection.mutable.{ HashMap, ListBuffer }
 import internal.Flags._
 //import scala.tools.nsc.util.ScalaClassLoader
 //import scala.tools.nsc.util.ScalaClassLoader._
-import ReflectionUtils.{staticSingletonInstance, innerSingletonInstance}
+import ReflectionUtils.{staticSingletonInstance, innerSingletonInstance, scalacShouldntLoadClass}
 import scala.language.existentials
 import scala.runtime.{ScalaRunTime, BoxesRunTime}
 import scala.reflect.internal.util.Collections._
@@ -567,15 +567,10 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
             loadBytes[Array[String]]("scala.reflect.ScalaLongSignature") match {
               case Some(slsig) =>
                 info(s"unpickling Scala $clazz and $module with long Scala signature")
-                val byteSegments = slsig map (_.getBytes)
-                val lens = byteSegments map ByteCodecs.decode
-                val bytes = Array.ofDim[Byte](lens.sum)
-                var len = 0
-                for ((bs, l) <- byteSegments zip lens) {
-                  bs.copyToArray(bytes, len, l)
-                  len += l
-                }
-                unpickler.unpickle(bytes, 0, clazz, module, jclazz.getName)
+                val encoded = slsig flatMap (_.getBytes)
+                val len = ByteCodecs.decode(encoded)
+                val decoded = encoded.take(len)
+                unpickler.unpickle(decoded, 0, clazz, module, jclazz.getName)
               case None =>
                 // class does not have a Scala signature; it's a Java class
                 info("translating reflection info for Java " + jclazz) //debug
@@ -678,8 +673,10 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
         val parents = try {
           parentsLevel += 1
           val jsuperclazz = jclazz.getGenericSuperclass
-          val superclazz = if (jsuperclazz == null) AnyClass.tpe else typeToScala(jsuperclazz)
-          superclazz :: (jclazz.getGenericInterfaces.toList map typeToScala)
+          val ifaces = jclazz.getGenericInterfaces.toList map typeToScala
+          val isAnnotation = (jclazz.getModifiers & JAVA_ACC_ANNOTATION) != 0
+          if (isAnnotation) AnnotationClass.tpe :: ClassfileAnnotationClass.tpe :: ifaces
+          else (if (jsuperclazz == null) AnyClass.tpe else typeToScala(jsuperclazz)) :: ifaces
         } finally {
           parentsLevel -= 1
         }
@@ -690,6 +687,11 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
 
         def enter(sym: Symbol, mods: Int) =
           (if (jModifier.isStatic(mods)) module.moduleClass else clazz).info.decls enter sym
+
+        def enterEmptyCtorIfNecessary(): Unit = {
+          if (jclazz.getConstructors.isEmpty)
+            clazz.info.decls.enter(clazz.newClassConstructor(NoPosition))
+        }
 
         for (jinner <- jclazz.getDeclaredClasses) {
           jclassAsScala(jinner) // inner class is entered as a side-effect
@@ -706,6 +708,8 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
 
           for (jconstr <- jclazz.getConstructors)
             enter(jconstrAsScala(jconstr), jconstr.getModifiers)
+
+          enterEmptyCtorIfNecessary()
 
         } :: pendingLoadActions
 
@@ -952,7 +956,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
         val cls =
           if (jclazz.isMemberClass && !nme.isImplClassName(jname))
             lookupClass
-          else if (jclazz.isLocalClass0 || isInvalidClassName(jname))
+          else if (jclazz.isLocalClass0 || scalacShouldntLoadClass(jname))
             // local classes and implementation classes not preserved by unpickling - treat as Java
             //
             // upd. but only if they cannot be loaded as top-level classes
@@ -1174,6 +1178,17 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
         var fullNameOfJavaClass = ownerClazz.getName
         if (childOfClass || childOfTopLevel) fullNameOfJavaClass += "$"
         fullNameOfJavaClass += clazz.name
+
+        // compactify (see SI-7779)
+        fullNameOfJavaClass = fullNameOfJavaClass match {
+          case PackageAndClassPattern(pack, clazzName) =>
+            // in a package
+            pack + compactifyName(clazzName)
+          case _ =>
+            // in the empty package
+            compactifyName(fullNameOfJavaClass)
+        }
+
         if (clazz.isModuleClass) fullNameOfJavaClass += "$"
 
         // println(s"ownerChildren = ${ownerChildren.toList}")
@@ -1182,6 +1197,8 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       } else
         noClass
     }
+
+    private val PackageAndClassPattern = """(.*\.)(.*)$""".r
 
     private def expandedName(sym: Symbol): String =
       if (sym.isPrivate) nme.expandedName(sym.name.toTermName, sym.owner).toString
@@ -1237,6 +1254,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       case TypeRef(_, ArrayClass, List(elemtpe)) => jArrayClass(typeToJavaClass(elemtpe))
       case TypeRef(_, sym: ClassSymbol, _) => classToJava(sym.asClass)
       case tpe @ TypeRef(_, sym: AliasTypeSymbol, _) => typeToJavaClass(tpe.dealias)
+      case SingleType(_, sym: ModuleSymbol) => classToJava(sym.moduleClass.asClass)
       case _ => throw new NoClassDefFoundError("no Java class corresponding to "+tpe+" found")
     }
   }

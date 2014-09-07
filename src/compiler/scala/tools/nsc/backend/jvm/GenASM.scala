@@ -86,6 +86,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters with GenJVMASM {
       if (settings.Xdce.value)
         for ((sym, cls) <- icodes.classes if inliner.isClosureClass(sym) && !deadCode.liveClosures(sym)) {
           log(s"Optimizer eliminated ${sym.fullNameString}")
+          deadCode.elidedClosures += sym
           icodes.classes -= sym
         }
 
@@ -449,7 +450,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters with GenJVMASM {
     }
 
     // -----------------------------------------------------------------------------------------
-    // utitilies useful when emitting plain, mirror, and beaninfo classes.
+    // utilities useful when emitting plain, mirror, and beaninfo classes.
     // -----------------------------------------------------------------------------------------
 
     def writeIfNotTooBig(label: String, jclassName: String, jclass: asm.ClassWriter, sym: Symbol) {
@@ -457,9 +458,9 @@ abstract class GenASM extends SubComponent with BytecodeWriters with GenJVMASM {
         val arr = jclass.toByteArray()
         bytecodeWriter.writeClass(label, jclassName, arr, sym)
       } catch {
-        case e: java.lang.RuntimeException if(e.getMessage() == "Class file too large!") =>
-          // TODO check where ASM throws the equivalent of CodeSizeTooBigException
-          log("Skipped class "+jclassName+" because it exceeds JVM limits (it's too big or has methods that are too long).")
+        case e: java.lang.RuntimeException if e != null && (e.getMessage contains "too large!") =>
+          reporter.error(sym.pos,
+            s"Could not write class $jclassName because it exceeds JVM code size limits. ${e.getMessage}")
       }
     }
 
@@ -624,7 +625,8 @@ abstract class GenASM extends SubComponent with BytecodeWriters with GenJVMASM {
           innerClassBuffer += m
       }
 
-      val allInners: List[Symbol] = innerClassBuffer.toList
+      val allInners: List[Symbol] = innerClassBuffer.toList filterNot deadCode.elidedClosures
+
       if (allInners.nonEmpty) {
         debuglog(csym.fullName('.') + " contains " + allInners.size + " inner classes.")
 
@@ -1395,12 +1397,36 @@ abstract class GenASM extends SubComponent with BytecodeWriters with GenJVMASM {
       }
 
       clasz.fields  foreach genField
-      clasz.methods foreach { im => genMethod(im, c.symbol.isInterface) }
+      clasz.methods foreach { im =>
+        if (im.symbol.isBridge && isRedundantBridge(im, clasz))
+          // We can't backport the erasure fix of SI-7120 to 2.10.x, but we can detect and delete
+          // bridge methods with identical signatures to their targets.
+          //
+          // NOTE: this backstop only implemented here in the ASM backend, and is not implemented in the FJBG backend.
+          debugwarn(s"Discarding redundant bridge method: ${im.symbol.debugLocationString}. See SI-8114.")
+        else 
+          genMethod(im, c.symbol.isInterface)
+      }
 
       addInnerClasses(clasz.symbol, jclass)
       jclass.visitEnd()
       writeIfNotTooBig("" + c.symbol.name, thisName, jclass, c.symbol)
+    }
 
+    private def isRedundantBridge(bridge: IMethod, owner: IClass): Boolean = {
+      def lastCalledMethod: Option[Symbol] = bridge.code.instructions.reverseIterator.collectFirst {
+        case CALL_METHOD(meth, _) => meth
+      }
+      def hasSameSignatureAsBridge(targetMethod: Symbol): Boolean = {
+        val targetIMethod = clasz.methods find (m => m.symbol == targetMethod)
+        // Important to compare the IMethod#paramss, rather then the erased MethodTypes, as
+        // due to the bug SI-7120, these are out of sync. For example, in the `applyOrElse`
+        // method in run/t8114.scala, the method symbol info has a parameter of type `Long`,
+        // but the IMethod parameter has type `Object`. The latter comes from the info of the
+        // symbol representing the parameter ValDef in the tree, which is incorrectly erased.
+        targetIMethod exists (m => bridge.matchesSignature(m))
+      }
+      lastCalledMethod exists hasSameSignatureAsBridge
     }
 
     /**

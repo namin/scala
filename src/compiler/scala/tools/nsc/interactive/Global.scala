@@ -238,7 +238,12 @@ class Global(settings: Settings, _reporter: Reporter, projectName: String = "") 
    *  @param  result   The transformed node
    */
   override def signalDone(context: Context, old: Tree, result: Tree) {
-    if (interruptsEnabled && analyzer.lockedCount == 0) {
+    val canObserveTree = (
+         interruptsEnabled
+      && analyzer.lockedCount == 0
+      && !context.bufferErrors // SI-7558 look away during exploratory typing in "silent mode"
+    )
+    if (canObserveTree) {
       if (context.unit.exists &&
           result.pos.isOpaqueRange &&
           (result.pos includes context.unit.targetPos)) {
@@ -249,14 +254,16 @@ class Global(settings: Settings, _reporter: Reporter, projectName: String = "") 
         }
         throw new TyperResult(located)
       }
-      try {
-        checkForMoreWork(old.pos)
-      } catch {
-        case ex: ValidateException => // Ignore, this will have been reported elsewhere
-          debugLog("validate exception caught: "+ex)
-        case ex: Throwable =>
-          log.flush()
-          throw ex
+      else {
+        try {
+          checkForMoreWork(old.pos)
+        } catch {
+          case ex: ValidateException => // Ignore, this will have been reported elsewhere
+            debugLog("validate exception caught: "+ex)
+          case ex: Throwable =>
+            log.flush()
+            throw ex
+        }
       }
     }
   }
@@ -948,7 +955,11 @@ class Global(settings: Settings, _reporter: Reporter, projectName: String = "") 
     val enclosing = new Members[ScopeMember]
     def addScopeMember(sym: Symbol, pre: Type, viaImport: Tree) =
       locals.add(sym, pre, false) { (s, st) =>
-        new ScopeMember(s, st, context.isAccessible(s, pre, false), viaImport)
+        // imported val and var are always marked as inaccessible, but they could be accessed through their getters. SI-7995
+        if (s.hasGetter) 
+          new ScopeMember(s, st, context.isAccessible(s.getter, pre, superAccess = false), viaImport)
+        else
+          new ScopeMember(s, st, context.isAccessible(s, pre, superAccess = false), viaImport)
       }
     def localsToEnclosing() = {
       enclosing.addNonShadowed(locals)
@@ -999,7 +1010,13 @@ class Global(settings: Settings, _reporter: Reporter, projectName: String = "") 
 
     val context = doLocateContext(pos)
 
-    if (tree.tpe == null)
+    val shouldTypeQualifier = tree.tpe match {
+      case null           => true
+      case mt: MethodType => mt.isImplicit
+      case _              => false
+    }
+
+    if (shouldTypeQualifier)
       // TODO: guard with try/catch to deal with ill-typed qualifiers.
       tree = analyzer.newTyper(context).typedQualifier(tree)
 
@@ -1059,7 +1076,7 @@ class Global(settings: Settings, _reporter: Reporter, projectName: String = "") 
   }
 
   /** Implements CompilerControl.askLoadedTyped */
-  private[interactive] def waitLoadedTyped(source: SourceFile, response: Response[Tree], onSameThread: Boolean = true) {
+  private[interactive] def waitLoadedTyped(source: SourceFile, response: Response[Tree], keepLoaded: Boolean = false, onSameThread: Boolean = true) {
     getUnit(source) match {
       case Some(unit) =>
         if (unit.isUpToDate) {
@@ -1077,7 +1094,10 @@ class Global(settings: Settings, _reporter: Reporter, projectName: String = "") 
       case None =>
         debugLog("load unit and type")
         try reloadSources(List(source))
-        finally waitLoadedTyped(source, response, onSameThread)
+        finally {
+          waitLoadedTyped(source, response, onSameThread)
+          if (!keepLoaded) removeUnitOf(source)
+        }
     }
   }
 
@@ -1192,4 +1212,3 @@ class Global(settings: Settings, _reporter: Reporter, projectName: String = "") 
 }
 
 object CancelException extends Exception
-
